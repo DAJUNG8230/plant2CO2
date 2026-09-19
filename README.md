@@ -1,14 +1,14 @@
 # plant2CO2
 
 AI 植被辨識與碳匯估算系統。  
-目前包含 **Flask 展示網站、Label Studio 標註轉換流程、DeepLabV3+ 訓練骨架**。
+目前包含 **Flask 網站、Label Studio 標註轉換、DeepLabV3+ 訓練與正式模型推論流程**。
 
 ## 系統流程
 
 ```text
 空拍 RGB 影像
    ↓
-DeepLabV3+ / Demo segmentation
+DeepLabV3+ semantic segmentation
    ↓
 Background / Grassland / Barren
    ↓
@@ -18,7 +18,7 @@ GSD 面積換算
    ↓
 碳匯估算
    ↓
-Web Dashboard
+Mask / Overlay / Web Dashboard
 ```
 
 ## 專案結構
@@ -31,7 +31,8 @@ plant2CO2/
 ├─ templates/
 │  └─ index.html
 ├─ models/
-│  └─ README.md
+│  ├─ README.md
+│  └─ best_model.pth        # 本機訓練後放這裡，不提交 GitHub
 ├─ uploads/
 │  └─ .gitkeep
 ├─ outputs/
@@ -62,62 +63,70 @@ pip install -r requirements.txt
 python app.py
 ```
 
-瀏覽器開啟：
+瀏覽器：
 
 ```text
 http://127.0.0.1:5000
 ```
 
-網站可以：
-
-- 上傳 JPG / PNG 空拍影像
-- 顯示 Original / Mask / Overlay
-- 顯示 Grassland / Barren / Background 比例
-- 根據 GSD 計算植被面積
-- 根據碳匯係數估算 CO₂e
-- 匯出分析結果 JSON
-
-## 3. 目前推論模式
-
-現在 `inference.py` 可以在沒有模型權重時使用 **Demo RGB segmentation**，因此網站 clone 下來後即可操作。
-
-這只是介面與資料流測試，不代表正式模型精度。
-
-正式模型完成後，將：
+模型/裝置狀態：
 
 ```text
-best_model.pth
+http://127.0.0.1:5000/api/status
 ```
 
-放到：
+## 3. 推論模式
+
+### 尚未有模型
+
+如果：
 
 ```text
 models/best_model.pth
 ```
 
-並完成 `inference.py` 中的：
+不存在，網站會使用 **Demo RGB segmentation**，方便先測試完整 UI 與 Flask 資料流。
 
-```python
-predict_with_model()
+### 已有正式模型
+
+`inference.py` 已經完成 DeepLabV3+ 載入與推論。
+
+只要將 `training/train.py` 產生的 checkpoint 放到：
+
+```text
+models/best_model.pth
 ```
 
-即可將 Dashboard 切換成真正的 DeepLabV3+ 結果。
+下一次分析時會自動：
+
+1. 載入 checkpoint
+2. 建立 DeepLabV3+ + ResNet50
+3. Resize / ImageNet Normalize
+4. GPU 可用時自動使用 CUDA
+5. 執行 semantic segmentation
+6. 將 logits resize 回原始影像尺寸
+7. 產生 class-index mask
+8. 產生彩色 Mask / Overlay
+9. 計算 Grassland / Barren / Background 百分比
+10. 計算植被面積與碳匯
+
+如果你在 Flask 執行期間替換 `best_model.pth`，程式也會根據檔案修改時間重新載入模型。
 
 ## 4. Label Studio → Dataset
 
-將 Label Studio 匯出的 JSON 放在專案根目錄：
+將 Label Studio JSON 放在：
 
 ```text
 export.json
 ```
 
-將對應原始影像放到：
+原始影像放在：
 
 ```text
 original_images/
 ```
 
-目前類別：
+類別：
 
 ```text
 0 = Background
@@ -133,7 +142,7 @@ python training\prepare_dataset.py
 python training\split_dataset.py
 ```
 
-最後會產生：
+輸出：
 
 ```text
 dataset/
@@ -154,7 +163,7 @@ dataset/
 python training\train.py
 ```
 
-目前預設：
+預設：
 
 - Model: DeepLabV3+
 - Encoder: ResNet50
@@ -164,20 +173,37 @@ python training\train.py
 - Optimizer: AdamW
 - Metric: IoU / foreground mIoU
 
-最佳模型會輸出到：
+最佳 checkpoint：
 
 ```text
 outputs_training/best_model.pth
 ```
 
-確認模型後再自行複製到：
+訓練完成後複製：
+
+```bat
+copy outputs_training\best_model.pth models\best_model.pth
+```
+
+然後重新進入網站或直接再次按「開始 AI 分析」即可使用正式模型。
+
+## 6. 確認 GPU
+
+```bat
+python -c "import torch; print('CUDA:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+如果輸出：
 
 ```text
-models/best_model.pth
+CUDA: True
 ```
+
+則訓練與推論會使用 NVIDIA GPU。
 
 ## 注意
 
-- `export.json`、原始資料集與模型 checkpoint 不直接提交到 GitHub。
-- GSD 與碳匯係數目前由 Dashboard 輸入；正式研究版應使用專題確認過的參數與文獻依據。
-- 如果影像是從同一張大型空拍影像切割而來，Train / Val / Test 建議按照場景分組，避免相鄰 patch 洩漏造成 mIoU 高估。
+- `best_model.pth` 預設不提交 GitHub。
+- Demo segmentation 僅用來測試網站流程，不能拿來代表正式模型準確率。
+- GSD 與碳匯係數應使用專題最後確認的參數與研究依據。
+- 若資料為同一大型空拍影像切割出的相鄰 patch，正式評估建議按場景/田區分組後再切 Train / Val / Test，避免資料洩漏。
