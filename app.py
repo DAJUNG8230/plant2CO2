@@ -5,7 +5,7 @@ import uuid
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 
-from inference import analyze_image
+from inference import analyze_image, get_runtime_status
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -23,6 +23,11 @@ app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/api/status")
+def status():
+    return jsonify(success=True, **get_runtime_status())
 
 
 @app.get("/outputs/<path:filename>")
