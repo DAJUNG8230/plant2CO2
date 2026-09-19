@@ -1,0 +1,38 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*
+
+# User uploads / generated outputs
+uploads/*
+!uploads/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Training data / Label Studio exports
+dataset/
+data/
+original_images/
+export.json
+*.zip
+
+# Model checkpoints (large files)
+models/*.pth
+models/*.pt
+models/*.ckpt
+!models/README.md
+
+# Logs
+*.log
