@@ -1,16 +1,14 @@
 """
 plant2CO2 inference layer.
 
-Current behavior:
-- If models/best_model.pth is not available, the app uses a lightweight RGB
-  demonstration segmentation so the full Flask website works immediately.
-- Replace predict_with_model() with the trained DeepLabV3+ pipeline when the
-  final checkpoint is ready.
-
 Class ids:
 0 = Background / Other
 1 = Grassland
 2 = Barren
+
+When models/best_model.pth exists, this module automatically loads the
+DeepLabV3+ checkpoint produced by training/train.py. If no checkpoint exists,
+the web demo falls back to a lightweight RGB rule-based segmentation.
 """
 
 from pathlib import Path
@@ -18,21 +16,31 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import torch
+import torch.nn.functional as F
+import segmentation_models_pytorch as smp
+
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "models" / "best_model.pth"
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 CLASS_COLORS = np.array(
     [
-        [71, 85, 105],
-        [23, 143, 89],
-        [154, 103, 64],
+        [71, 85, 105],   # Background
+        [23, 143, 89],   # Grassland
+        [154, 103, 64],  # Barren
     ],
     dtype=np.uint8,
 )
 
+_MODEL = None
+_MODEL_META = {}
+_MODEL_MTIME = None
+
 
 def _demo_segmentation(rgb: np.ndarray) -> np.ndarray:
-    """Simple RGB rules used only until a trained model is connected."""
+    """Simple RGB rules used only until a trained model is available."""
     arr = rgb.astype(np.float32)
     r = arr[..., 0]
     g = arr[..., 1]
@@ -65,16 +73,125 @@ def _demo_segmentation(rgb: np.ndarray) -> np.ndarray:
     return mask
 
 
+def _load_checkpoint():
+    try:
+        return torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
+    except TypeError:
+        # Compatibility with older PyTorch versions.
+        return torch.load(MODEL_PATH, map_location=DEVICE)
+
+
+def load_model():
+    """
+    Load and cache the trained DeepLabV3+ model.
+
+    The cache is refreshed automatically when best_model.pth is replaced.
+    """
+    global _MODEL, _MODEL_META, _MODEL_MTIME
+
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"找不到模型權重：{MODEL_PATH}. "
+            "請先執行 training/train.py。"
+        )
+
+    current_mtime = MODEL_PATH.stat().st_mtime
+
+    if _MODEL is not None and _MODEL_MTIME == current_mtime:
+        return _MODEL
+
+    checkpoint = _load_checkpoint()
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+        encoder = checkpoint.get("encoder", "resnet50")
+        num_classes = int(checkpoint.get("num_classes", 3))
+        image_size = int(checkpoint.get("image_size", 512))
+        class_names = checkpoint.get(
+            "class_names",
+            ["Background", "Grassland", "Barren"],
+        )
+        best_miou = checkpoint.get("best_miou")
+    else:
+        # Also support a raw state_dict checkpoint.
+        state_dict = checkpoint
+        encoder = "resnet50"
+        num_classes = 3
+        image_size = 512
+        class_names = ["Background", "Grassland", "Barren"]
+        best_miou = None
+
+    model = smp.DeepLabV3Plus(
+        encoder_name=encoder,
+        encoder_weights=None,
+        in_channels=3,
+        classes=num_classes,
+    )
+
+    model.load_state_dict(state_dict, strict=True)
+    model.to(DEVICE)
+    model.eval()
+
+    _MODEL = model
+    _MODEL_MTIME = current_mtime
+    _MODEL_META = {
+        "encoder": encoder,
+        "num_classes": num_classes,
+        "image_size": image_size,
+        "class_names": class_names,
+        "best_miou": float(best_miou) if best_miou is not None else None,
+        "device": str(DEVICE),
+    }
+
+    return _MODEL
+
+
+def _prepare_tensor(rgb: np.ndarray, image_size: int) -> torch.Tensor:
+    image = Image.fromarray(rgb).resize(
+        (image_size, image_size),
+        Image.Resampling.BILINEAR,
+    )
+
+    array = np.asarray(image, dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
+
+    mean = torch.tensor(
+        [0.485, 0.456, 0.406],
+        dtype=tensor.dtype,
+    ).view(1, 3, 1, 1)
+
+    std = torch.tensor(
+        [0.229, 0.224, 0.225],
+        dtype=tensor.dtype,
+    ).view(1, 3, 1, 1)
+
+    tensor = (tensor - mean) / std
+    return tensor.to(DEVICE)
+
+
 def predict_with_model(rgb: np.ndarray) -> np.ndarray:
     """
-    TODO: Connect the trained DeepLabV3+ checkpoint here.
-
-    Return H x W uint8 class ids:
-      0 = Background
-      1 = Grassland
-      2 = Barren
+    Run DeepLabV3+ inference and return an H x W uint8 class-index mask.
     """
-    raise NotImplementedError("DeepLabV3+ checkpoint is not connected yet.")
+    model = load_model()
+    image_size = int(_MODEL_META.get("image_size", 512))
+
+    input_tensor = _prepare_tensor(rgb, image_size)
+
+    with torch.inference_mode():
+        logits = model(input_tensor)
+
+        # Resize logits back to the original image resolution before argmax.
+        logits = F.interpolate(
+            logits,
+            size=rgb.shape[:2],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        mask = torch.argmax(logits, dim=1)[0]
+
+    return mask.detach().cpu().numpy().astype(np.uint8)
 
 
 def _save_visuals(
@@ -83,6 +200,9 @@ def _save_visuals(
     output_dir: Path,
     job_id: str,
 ) -> tuple[str, str]:
+    if int(mask.max()) >= len(CLASS_COLORS):
+        raise ValueError("模型輸出了未定義的 class id")
+
     color_mask = CLASS_COLORS[mask]
 
     mask_filename = f"{job_id}_mask.png"
@@ -100,6 +220,23 @@ def _save_visuals(
     return mask_filename, overlay_filename
 
 
+def get_runtime_status() -> dict:
+    """Return lightweight runtime information for the Flask status endpoint."""
+    return {
+        "checkpoint_exists": MODEL_PATH.exists(),
+        "checkpoint_path": str(MODEL_PATH),
+        "device": str(DEVICE),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_name": (
+            torch.cuda.get_device_name(0)
+            if torch.cuda.is_available()
+            else None
+        ),
+        "loaded": _MODEL is not None,
+        "model_meta": _MODEL_META or None,
+    }
+
+
 def analyze_image(
     image_path: Path,
     output_dir: Path,
@@ -112,13 +249,18 @@ def analyze_image(
     image = Image.open(image_path).convert("RGB")
     rgb = np.asarray(image)
 
+    model_error = None
+
     if MODEL_PATH.exists():
         try:
             mask = predict_with_model(rgb)
             mode = "model"
-        except NotImplementedError:
+        except Exception as exc:
+            # Keep the website usable during development, but expose the error
+            # instead of silently pretending the fallback is the real model.
             mask = _demo_segmentation(rgb)
-            mode = "demo"
+            mode = "demo_fallback"
+            model_error = str(exc)
     else:
         mask = _demo_segmentation(rgb)
         mode = "demo"
@@ -146,10 +288,22 @@ def analyze_image(
         job_id=job_id,
     )
 
+    validation_miou = (
+        _MODEL_META.get("best_miou")
+        if mode == "model"
+        else None
+    )
+
     return {
         "mode": mode,
-        "model": "DeepLabV3+ · ResNet50" if mode == "model" else "Demo RGB segmentation",
-        "validation_miou": None,
+        "model": (
+            f"DeepLabV3+ · {_MODEL_META.get('encoder', 'resnet50')}"
+            if mode == "model"
+            else "Demo RGB segmentation"
+        ),
+        "device": str(DEVICE),
+        "validation_miou": validation_miou,
+        "model_error": model_error,
         "width": image.width,
         "height": image.height,
         "gsd_cm_per_pixel": gsd_cm_per_pixel,
