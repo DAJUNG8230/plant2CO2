@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>plant2CO2</title>
+<style>
+:root{--g:#178f59;--gd:#0d633f;--bg:#f3f7f4;--card:#fff;--t:#17231c;--m:#6c7b71;--line:#dfe8e2}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,"Microsoft JhengHei",sans-serif;background:var(--bg);color:var(--t)}
+.wrap{max-width:1280px;margin:auto;padding:24px}.top,.card{background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 12px 30px rgba(0,0,0,.06)}
+.top{padding:18px 22px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;gap:12px;align-items:center}.logo{width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,var(--g),var(--gd));display:grid;place-items:center;color:white;font-size:23px}.brand h1{font-size:20px;margin:0}.brand p{margin:4px 0 0;color:var(--m);font-size:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}.card{padding:22px}.drop{border:2px dashed #bfd6c8;border-radius:16px;padding:28px;text-align:center;background:#f8fcf9;cursor:pointer}.drop:hover{border-color:var(--g)}.drop strong{display:block;margin-bottom:6px}.muted{color:var(--m);font-size:13px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.field label{display:block;color:var(--m);font-size:12px;font-weight:700;margin-bottom:6px}.field input,.field select{width:100%;padding:11px;border:1px solid var(--line);border-radius:11px;background:#fff}
+.btn{border:0;border-radius:12px;padding:12px 16px;font-weight:800;cursor:pointer}.primary{background:linear-gradient(135deg,var(--g),var(--gd));color:#fff}.secondary{background:#edf3ef;color:#294739}.actions{display:flex;gap:10px;margin-top:15px;flex-wrap:wrap}
+.preview{min-height:430px;background:#eef3ef;border-radius:15px;display:grid;place-items:center;overflow:hidden}.preview img{max-width:100%;max-height:430px}.tabs{display:flex;gap:7px;margin-bottom:12px}.tab{border:0;padding:8px 11px;border-radius:9px;background:#edf3ef;cursor:pointer}.tab.active{background:var(--g);color:#fff}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;margin-top:20px}.kpi{padding:18px}.kpi span{font-size:12px;color:var(--m)}.kpi strong{display:block;font-size:27px;margin-top:7px}
+.result{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}.bar{margin:17px 0}.barhead{display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px}.track{height:10px;background:#edf2ef;border-radius:999px;overflow:hidden}.fill{height:100%;width:0;transition:.5s}.grass{background:#178f59}.barren{background:#9a6740}.background{background:#475569}
+.status{font-size:13px;color:var(--gd);font-weight:800}.hidden{display:none}.progress{height:9px;background:#e5ede8;border-radius:999px;overflow:hidden;margin-top:14px}.progress div{height:100%;width:0;background:var(--g);transition:.3s}.footer{text-align:center;color:var(--m);font-size:12px;padding:24px}
+@media(max-width:850px){.grid,.result{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}@media(max-width:560px){.fields,.kpis{grid-template-columns:1fr}.wrap{padding:12px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand"><div class="logo">🌿</div><div><h1>AI 植被辨識與碳匯估算系統</h1><p>plant2CO2 · Aerial Vegetation Analysis</p></div></div>
+  <div class="status">● Flask API Online</div>
+</header>
+
+<section class="grid">
+  <div class="card">
+    <h2>上傳空拍影像</h2>
+    <p class="muted">支援 JPG / PNG。後端會輸出 segmentation mask、overlay、土地覆蓋率與碳匯估算。</p>
+    <div class="drop" id="drop"><input id="file" type="file" accept="image/png,image/jpeg" hidden><strong>拖曳圖片至此或點擊選擇</strong><span class="muted">RGB aerial image</span></div>
+    <div class="fields">
+      <div class="field"><label>模型</label><select id="model"><option>DeepLabV3+ · ResNet50</option></select></div>
+      <div class="field"><label>GSD（cm / pixel）</label><input id="gsd" type="number" min="0.1" step="0.1" value="5.0"></div>
+      <div class="field"><label>碳匯係數（kg CO₂e / m²）</label><input id="coeff" type="number" min="0" step="0.01" value="0.35"></div>
+      <div class="field"><label>狀態</label><input id="mode" value="等待分析" disabled></div>
+    </div>
+    <div class="actions"><button class="btn primary" id="analyze" disabled>開始 AI 分析</button><button class="btn secondary" id="reset">清除</button></div>
+    <div class="progress hidden" id="progress"><div id="progressFill"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs"><button class="tab active" data-view="original">Original</button><button class="tab" data-view="mask">Mask</button><button class="tab" data-view="overlay">Overlay</button></div>
+    <div class="preview"><img id="preview" alt=""><div id="empty" class="muted">尚未載入影像</div></div>
+    <p class="muted" id="meta">檔案：—</p>
+  </div>
+</section>
+
+<section class="kpis">
+  <div class="card kpi"><span>植被覆蓋率</span><strong id="vegRate">—</strong></div>
+  <div class="card kpi"><span>植被面積</span><strong id="vegArea">—</strong></div>
+  <div class="card kpi"><span>預估碳匯</span><strong id="carbon">—</strong></div>
+  <div class="card kpi"><span>推論時間</span><strong id="time">—</strong></div>
+</section>
+
+<section class="result">
+  <div class="card">
+    <h3>土地覆蓋分析</h3>
+    <div class="bar"><div class="barhead"><b>Grassland</b><span id="grassPct">0%</span></div><div class="track"><div class="fill grass" id="grassBar"></div></div></div>
+    <div class="bar"><div class="barhead"><b>Barren</b><span id="barrenPct">0%</span></div><div class="track"><div class="fill barren" id="barrenBar"></div></div></div>
+    <div class="bar"><div class="barhead"><b>Background / Other</b><span id="bgPct">0%</span></div><div class="track"><div class="fill background" id="bgBar"></div></div></div>
+  </div>
+  <div class="card">
+    <h3>模型資訊</h3>
+    <p><b>Model：</b>DeepLabV3+</p>
+    <p><b>Encoder：</b>ResNet50</p>
+    <p><b>Classes：</b>Background / Grassland / Barren</p>
+    <p><b>Validation mIoU：</b><span id="miou">待正式模型填入</span></p>
+    <p class="muted" id="note">目前若沒有 best_model.pth，會由後端展示推論產生結果。</p>
+  </div>
+</section>
+
+<div class="footer">plant2CO2 · Flask + PyTorch semantic segmentation dashboard</div>
+</div>
+
+<script>
+const file=document.getElementById('file'),drop=document.getElementById('drop'),analyze=document.getElementById('analyze'),preview=document.getElementById('preview'),empty=document.getElementById('empty');
+let currentFile=null,urls={original:null,mask:null,overlay:null},currentView='original';
+drop.onclick=()=>file.click();
+drop.ondragover=e=>e.preventDefault();
+drop.ondrop=e=>{e.preventDefault();if(e.dataTransfer.files[0])load(e.dataTransfer.files[0])};
+file.onchange=e=>{if(e.target.files[0])load(e.target.files[0])};
+function load(f){currentFile=f;urls.original=URL.createObjectURL(f);preview.src=urls.original;preview.classList.remove('hidden');empty.classList.add('hidden');analyze.disabled=false;document.getElementById('meta').textContent='檔案：'+f.name;show('original')}
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>show(b.dataset.view));
+function show(v){currentView=v;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));if(urls[v])preview.src=urls[v]}
+function pct(n){return Number(n).toFixed(1)+'%'}function num(n){return Number(n).toLocaleString('zh-TW',{maximumFractionDigits:2})}
+analyze.onclick=async()=>{
+  if(!currentFile)return;
+  analyze.disabled=true;
+  const p=document.getElementById('progress'),pf=document.getElementById('progressFill');p.classList.remove('hidden');pf.style.width='35%';document.getElementById('mode').value='分析中...';
+  const fd=new FormData();fd.append('image',currentFile);fd.append('gsd',document.getElementById('gsd').value);fd.append('carbon_coefficient',document.getElementById('coeff').value);
+  try{
+    const r=await fetch('/api/analyze',{method:'POST',body:fd});pf.style.width='80%';const d=await r.json();if(!r.ok||!d.success)throw new Error(d.message||'分析失敗');
+    urls.mask=d.mask_url+'?t='+Date.now();urls.overlay=d.overlay_url+'?t='+Date.now();
+    document.getElementById('vegRate').textContent=pct(d.grassland_pct);
+    document.getElementById('vegArea').textContent=num(d.vegetation_area_m2)+' m²';
+    document.getElementById('carbon').textContent=num(d.carbon_sink_kg_co2e)+' kg';
+    document.getElementById('time').textContent=Number(d.inference_time).toFixed(2)+' s';
+    document.getElementById('grassPct').textContent=pct(d.grassland_pct);document.getElementById('barrenPct').textContent=pct(d.barren_pct);document.getElementById('bgPct').textContent=pct(d.background_pct);
+    document.getElementById('grassBar').style.width=d.grassland_pct+'%';document.getElementById('barrenBar').style.width=d.barren_pct+'%';document.getElementById('bgBar').style.width=d.background_pct+'%';
+    document.getElementById('mode').value=d.mode==='model'?'正式模型':'展示推論';
+    document.getElementById('note').textContent=d.mode==='model'?'DeepLabV3+ 模型推論完成':'尚未載入正式模型，目前使用後端展示推論';
+    if(d.validation_miou!=null)document.getElementById('miou').textContent=pct(d.validation_miou*100);
+    pf.style.width='100%';show('overlay');
+  }catch(e){alert(e.message);document.getElementById('mode').value='分析失敗'}finally{setTimeout(()=>p.classList.add('hidden'),700);analyze.disabled=false}
+};
+document.getElementById('reset').onclick=()=>{currentFile=null;file.value='';preview.removeAttribute('src');empty.classList.remove('hidden');analyze.disabled=true;document.getElementById('meta').textContent='檔案：—';document.getElementById('mode').value='等待分析';['vegRate','vegArea','carbon','time'].forEach(id=>document.getElementById(id).textContent='—');['grassBar','barrenBar','bgBar'].forEach(id=>document.getElementById(id).style.width='0%')};
+</script>
+</body>
+</html>
