@@ -31,7 +31,7 @@
     <p class="muted">支援 JPG / PNG。後端會輸出 segmentation mask、overlay、土地覆蓋率與碳匯估算。</p>
     <div class="drop" id="drop"><input id="file" type="file" accept="image/png,image/jpeg" hidden><strong>拖曳圖片至此或點擊選擇</strong><span class="muted">RGB aerial image</span></div>
     <div class="fields">
-      <div class="field"><label>模型</label><select id="model"><option>DeepLabV3+ · ResNet50</option></select></div>
+      <div class="field"><label>模型</label><select id="model"><option value="deeplabv3plus">DeepLabV3+ · ResNet50</option><option value="unet">U-Net · ResNet34</option></select></div>
       <div class="field"><label>GSD（cm / pixel）</label><input id="gsd" type="number" min="0.1" step="0.1" value="5.0"></div>
       <div class="field"><label>碳匯係數（kg CO₂e / m²）</label><input id="coeff" type="number" min="0" step="0.01" value="0.35"></div>
       <div class="field"><label>狀態</label><input id="mode" value="等待分析" disabled></div>
@@ -63,8 +63,8 @@
   </div>
   <div class="card">
     <h3>模型資訊</h3>
-    <p><b>Model：</b>DeepLabV3+</p>
-    <p><b>Encoder：</b>ResNet50</p>
+    <p><b>Model：</b><span id="modelName">—</span></p>
+    <p><b>Encoder：</b><span id="encoderName">—</span></p>
     <p><b>Classes：</b>Background / Grassland / Barren</p>
     <p><b>Validation mIoU：</b><span id="miou">待正式模型填入</span></p>
     <p class="muted" id="note">目前若沒有 best_model.pth，會由後端展示推論產生結果。</p>
@@ -89,7 +89,7 @@ analyze.onclick=async()=>{
   if(!currentFile)return;
   analyze.disabled=true;
   const p=document.getElementById('progress'),pf=document.getElementById('progressFill');p.classList.remove('hidden');pf.style.width='35%';document.getElementById('mode').value='分析中...';
-  const fd=new FormData();fd.append('image',currentFile);fd.append('gsd',document.getElementById('gsd').value);fd.append('carbon_coefficient',document.getElementById('coeff').value);
+  const fd=new FormData();fd.append('image',currentFile);fd.append('model',document.getElementById('model').value);fd.append('gsd',document.getElementById('gsd').value);fd.append('carbon_coefficient',document.getElementById('coeff').value);
   try{
     const r=await fetch('/api/analyze',{method:'POST',body:fd});pf.style.width='80%';const d=await r.json();if(!r.ok||!d.success)throw new Error(d.message||'分析失敗');
     urls.mask=d.mask_url+'?t='+Date.now();urls.overlay=d.overlay_url+'?t='+Date.now();
@@ -99,8 +99,8 @@ analyze.onclick=async()=>{
     document.getElementById('time').textContent=Number(d.inference_time).toFixed(2)+' s';
     document.getElementById('grassPct').textContent=pct(d.grassland_pct);document.getElementById('barrenPct').textContent=pct(d.barren_pct);document.getElementById('bgPct').textContent=pct(d.background_pct);
     document.getElementById('grassBar').style.width=d.grassland_pct+'%';document.getElementById('barrenBar').style.width=d.barren_pct+'%';document.getElementById('bgBar').style.width=d.background_pct+'%';
-    document.getElementById('mode').value=d.mode==='model'?'正式模型':'展示推論';
-    document.getElementById('note').textContent=d.mode==='model'?'DeepLabV3+ 模型推論完成':'尚未載入正式模型，目前使用後端展示推論';
+    document.getElementById('mode').value=d.mode==='model'?'正式模型':'展示推論';document.getElementById('modelName').textContent=d.model||'—';document.getElementById('encoderName').textContent=d.encoder||'—';
+    document.getElementById('note').textContent=d.mode==='model'?(d.model+' 模型推論完成'):'尚未載入正式模型，目前使用後端展示推論';
     if(d.validation_miou!=null)document.getElementById('miou').textContent=pct(d.validation_miou*100);
     pf.style.width='100%';show('overlay');
   }catch(e){alert(e.message);document.getElementById('mode').value='分析失敗'}finally{setTimeout(()=>p.classList.add('hidden'),700);analyze.disabled=false}
