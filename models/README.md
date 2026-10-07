@@ -6,65 +6,79 @@
 models/
 ├─ deeplabv3plus_best.pth
 ├─ unet_best.pth
-└─ segformer_best.pth
-```
-
-DeepLabV3+ 也相容舊檔名：
-
-```text
-models/best_model.pth
+└─ best_model_segformer/
+   ├─ config.json
+   ├─ model.safetensors
+   └─ preprocessor_config.json
 ```
 
 ## DeepLabV3+
 
-建議 checkpoint：
+建議檔名：
 
-```python
-{
-    "model_state_dict": model.state_dict(),
-    "encoder": "resnet50",
-    "num_classes": 3,
-    "image_size": 512,
-    "best_miou": best_miou,
-}
+```text
+models/deeplabv3plus_best.pth
 ```
+
+舊檔名 `models/best_model.pth` 仍可使用。
 
 ## U-Net
 
-建議 checkpoint：
+建議檔名：
 
-```python
-{
-    "model_state_dict": model.state_dict(),
-    "encoder": "resnet34",
-    "num_classes": 3,
-    "image_size": 512,
-    "best_miou": best_miou,
-}
+```text
+models/unet_best.pth
 ```
 
 ## SegFormer
 
-網站預設以 MiT-B0 為 SegFormer 骨幹，權重檔：
+SegFormer 目前直接支援 Hugging Face `save_pretrained()` 輸出格式。
+
+請把組員給你的整個資料夾放到：
 
 ```text
-models/segformer_best.pth
+models/best_model_segformer/
 ```
 
-建議保存：
+資料夾至少要包含：
+
+```text
+config.json
+model.safetensors
+preprocessor_config.json
+```
+
+網站會使用：
 
 ```python
-{
-    "model_state_dict": model.state_dict(),
-    "hf_model_name": "nvidia/segformer-b0-finetuned-ade-512-512",
-    "num_classes": 3,
-    "image_size": 512,
-    "best_miou": best_miou,
-}
+SegformerForSemanticSegmentation.from_pretrained(...)
+SegformerImageProcessor.from_pretrained(...)
 ```
 
-SegFormer 需要 `transformers` 套件；執行 `pip install -r requirements.txt` 即可安裝。
+直接讀取本機模型與原本的前處理設定，不需要將 `model.safetensors` 轉成 `.pth`。
 
-若你的 SegFormer 是用其他 MiT-B1/B2/B3/B4/B5、不同 image processor，或 checkpoint 格式不同，請依實際訓練程式調整 `hf_model_name` 與前處理設定。
+### SegFormer 類別順序
 
-模型檔預設由 `.gitignore` 排除，不會直接提交 GitHub。
+目前網站統計與顏色設定仍假設：
+
+```text
+0 = Background
+1 = Grassland
+2 = Barren
+```
+
+請確認 `config.json` 的 `id2label` / `label2id` 與這個順序一致。
+
+如果組員的類別順序不同，請先修改網站 mapping，不要直接用錯誤順序計算面積與碳匯。
+
+## 套件
+
+SegFormer 需要：
+
+```bat
+python -m pip install -r requirements.txt
+```
+
+其中 `requirements.txt` 已包含 `transformers`。
+
+模型權重與模型資料夾建議不要提交 GitHub；放在本機 `models/` 即可。
