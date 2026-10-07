@@ -15,6 +15,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+ALLOWED_MODELS = {"deeplabv3plus", "unet"}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
@@ -50,6 +51,10 @@ def analyze():
     if suffix not in ALLOWED_EXTENSIONS:
         return jsonify(success=False, message="只支援 JPG / JPEG / PNG"), 400
 
+    model_name = request.form.get("model", "deeplabv3plus").strip().lower()
+    if model_name not in ALLOWED_MODELS:
+        return jsonify(success=False, message=f"不支援的模型：{model_name}"), 400
+
     try:
         gsd_cm = float(request.form.get("gsd", "5.0"))
         carbon_coefficient = float(request.form.get("carbon_coefficient", "0.35"))
@@ -74,6 +79,7 @@ def analyze():
             job_id=job_id,
             gsd_cm_per_pixel=gsd_cm,
             carbon_coefficient=carbon_coefficient,
+            model_name=model_name,
         )
     except Exception as exc:
         app.logger.exception("Analysis failed")
