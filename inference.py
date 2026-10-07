@@ -25,6 +25,12 @@ MODEL_CONFIG = {
         "default_encoder": "resnet34",
         "paths": [MODELS_DIR / "unet_best.pth"],
     },
+    "segformer": {
+        "display_name": "SegFormer",
+        "default_encoder": "MiT-B0",
+        "default_hf_model_name": "nvidia/segformer-b0-finetuned-ade-512-512",
+        "paths": [MODELS_DIR / "segformer_best.pth"],
+    },
 }
 
 CLASS_COLORS = np.array(
@@ -86,7 +92,7 @@ def _load_checkpoint(path):
         return torch.load(path, map_location=DEVICE)
 
 
-def _build_model(model_name, encoder, num_classes):
+def _build_model(model_name, encoder, num_classes, checkpoint=None):
     if model_name == "deeplabv3plus":
         return smp.DeepLabV3Plus(
             encoder_name=encoder,
@@ -94,6 +100,7 @@ def _build_model(model_name, encoder, num_classes):
             in_channels=3,
             classes=num_classes,
         )
+
     if model_name == "unet":
         return smp.Unet(
             encoder_name=encoder,
@@ -101,6 +108,28 @@ def _build_model(model_name, encoder, num_classes):
             in_channels=3,
             classes=num_classes,
         )
+
+    if model_name == "segformer":
+        try:
+            from transformers import SegformerForSemanticSegmentation
+        except ImportError as exc:
+            raise ImportError(
+                "SegFormer 需要 transformers 套件，請執行 pip install -r requirements.txt"
+            ) from exc
+
+        config = MODEL_CONFIG["segformer"]
+        hf_model_name = config["default_hf_model_name"]
+
+        if isinstance(checkpoint, dict):
+            hf_model_name = checkpoint.get("hf_model_name", hf_model_name)
+
+        model = SegformerForSemanticSegmentation.from_pretrained(
+            hf_model_name,
+            num_labels=num_classes,
+            ignore_mismatched_sizes=True,
+        )
+        return model
+
     raise ValueError(f"未知模型：{model_name}")
 
 
@@ -125,14 +154,24 @@ def load_model(model_name):
         num_classes = int(checkpoint.get("num_classes", 3))
         image_size = int(checkpoint.get("image_size", 512))
         best_miou = checkpoint.get("best_miou")
+        hf_model_name = checkpoint.get(
+            "hf_model_name",
+            config.get("default_hf_model_name"),
+        )
     else:
         state_dict = checkpoint
         encoder = config["default_encoder"]
         num_classes = 3
         image_size = 512
         best_miou = None
+        hf_model_name = config.get("default_hf_model_name")
 
-    model = _build_model(model_name, encoder, num_classes)
+    model = _build_model(
+        model_name,
+        encoder,
+        num_classes,
+        checkpoint=checkpoint,
+    )
     model.load_state_dict(state_dict, strict=True)
     model.to(DEVICE)
     model.eval()
@@ -145,6 +184,7 @@ def load_model(model_name):
         "image_size": image_size,
         "best_miou": float(best_miou) if best_miou is not None else None,
         "checkpoint_path": str(model_path),
+        "hf_model_name": hf_model_name,
     }
     return model
 
@@ -169,7 +209,13 @@ def predict_with_model(rgb, model_name):
     x = _prepare_tensor(rgb, image_size)
 
     with torch.inference_mode():
-        logits = model(x)
+        output = model(x)
+
+        if model_name == "segformer":
+            logits = output.logits
+        else:
+            logits = output
+
         logits = F.interpolate(
             logits,
             size=rgb.shape[:2],
@@ -182,6 +228,9 @@ def predict_with_model(rgb, model_name):
 
 
 def _save_visuals(rgb, mask, output_dir, job_id, model_name):
+    if mask.max() >= len(CLASS_COLORS):
+        raise ValueError("模型輸出了未定義的 class id")
+
     color_mask = CLASS_COLORS[mask]
 
     mask_filename = f"{job_id}_{model_name}_mask.png"
