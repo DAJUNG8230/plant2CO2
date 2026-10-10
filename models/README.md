@@ -12,54 +12,9 @@ models/
    └─ preprocessor_config.json
 ```
 
-## DeepLabV3+
+## DeepLabV3+ / U-Net
 
-建議檔名：
-
-```text
-models/deeplabv3plus_best.pth
-```
-
-舊檔名 `models/best_model.pth` 仍可使用。
-
-## U-Net
-
-建議檔名：
-
-```text
-models/unet_best.pth
-```
-
-## SegFormer
-
-SegFormer 目前直接支援 Hugging Face `save_pretrained()` 輸出格式。
-
-請把組員給你的整個資料夾放到：
-
-```text
-models/best_model_segformer/
-```
-
-資料夾至少要包含：
-
-```text
-config.json
-model.safetensors
-preprocessor_config.json
-```
-
-網站會使用：
-
-```python
-SegformerForSemanticSegmentation.from_pretrained(...)
-SegformerImageProcessor.from_pretrained(...)
-```
-
-直接讀取本機模型與原本的前處理設定，不需要將 `model.safetensors` 轉成 `.pth`。
-
-### SegFormer 類別順序
-
-目前網站統計與顏色設定仍假設：
+DeepLabV3+ 與 U-Net 目前維持 3 類：
 
 ```text
 0 = Background
@@ -67,18 +22,71 @@ SegformerImageProcessor.from_pretrained(...)
 2 = Barren
 ```
 
-請確認 `config.json` 的 `id2label` / `label2id` 與這個順序一致。
+## SegFormer
 
-如果組員的類別順序不同，請先修改網站 mapping，不要直接用錯誤順序計算面積與碳匯。
+SegFormer 現在改成 **11 類**。
 
-## 套件
+網站會直接從：
 
-SegFormer 需要：
-
-```bat
-python -m pip install -r requirements.txt
+```text
+models/best_model_segformer/config.json
 ```
 
-其中 `requirements.txt` 已包含 `transformers`。
+讀取：
 
-模型權重與模型資料夾建議不要提交 GitHub；放在本機 `models/` 即可。
+```text
+num_labels
+id2label
+label2id
+```
+
+並使用：
+
+```python
+SegformerForSemanticSegmentation.from_pretrained(...)
+SegformerImageProcessor.from_pretrained(...)
+```
+
+載入：
+
+```text
+config.json
+model.safetensors
+preprocessor_config.json
+```
+
+網站會驗證：
+
+```text
+num_labels = 11
+```
+
+如果模型不是 11 類會直接提示錯誤。
+
+### 網頁顯示
+
+選擇 SegFormer 時，土地覆蓋分析會改為動態顯示 11 個類別的：
+
+- Class ID
+- 類別名稱
+- Pixel 比例
+- 對應顏色
+
+類別名稱直接使用 SegFormer 的 `config.json -> id2label`，因此不需要在網站程式中手動寫死 11 個名稱。
+
+### 碳匯
+
+目前碳匯仍以 Grassland 類別計算。網站會從 `id2label` 自動尋找名稱包含：
+
+```text
+Grassland
+Grass
+草地
+草坪
+```
+
+的類別。
+
+因此若你的 11 類使用其他名稱，需再指定哪些 Class ID 應納入「植被面積」與碳匯計算。
+
+模型資料夾與大型權重不建議提交 GitHub。
