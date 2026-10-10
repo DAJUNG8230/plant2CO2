@@ -59,13 +59,13 @@
     <h3>土地覆蓋分析</h3>
     <div class="bar"><div class="barhead"><b>Grassland</b><span id="grassPct">0%</span></div><div class="track"><div class="fill grass" id="grassBar"></div></div></div>
     <div class="bar"><div class="barhead"><b>Barren</b><span id="barrenPct">0%</span></div><div class="track"><div class="fill barren" id="barrenBar"></div></div></div>
-    <div class="bar"><div class="barhead"><b>Background / Other</b><span id="bgPct">0%</span></div><div class="track"><div class="fill background" id="bgBar"></div></div></div>
+    <div class="bar"><div class="barhead"><b>Background / Other</b><span id="bgPct">0%</span></div><div class="track"><div class="fill background" id="bgBar"></div></div></div><div id="dynamicClasses"></div>
   </div>
   <div class="card">
     <h3>模型資訊</h3>
     <p><b>Model：</b><span id="modelName">—</span></p>
     <p><b>Encoder：</b><span id="encoderName">—</span></p>
-    <p><b>Classes：</b>Background / Grassland / Barren</p>
+    <p><b>Classes：</b><span id="classesInfo">Background / Grassland / Barren</span></p>
     <p><b>Validation mIoU：</b><span id="miou">待正式模型填入</span></p>
     <p class="muted" id="note">目前若沒有 best_model.pth，會由後端展示推論產生結果。</p>
   </div>
@@ -101,6 +101,26 @@ analyze.onclick=async()=>{
     document.getElementById('grassBar').style.width=d.grassland_pct+'%';document.getElementById('barrenBar').style.width=d.barren_pct+'%';document.getElementById('bgBar').style.width=d.background_pct+'%';
     document.getElementById('mode').value=d.mode==='model'?'正式模型':'展示推論';document.getElementById('modelName').textContent=d.model||'—';document.getElementById('encoderName').textContent=d.encoder||'—';
     document.getElementById('note').textContent=d.mode==='model'?(d.model+' 模型推論完成'):'尚未載入正式模型，目前使用後端展示推論';
+    const classesInfo=document.getElementById('classesInfo');
+    const dynamic=document.getElementById('dynamicClasses');
+    dynamic.innerHTML='';
+    if(d.selected_model==='segformer' && d.mode==='model' && Array.isArray(d.class_stats)){
+      classesInfo.textContent=d.num_classes+' Classes';
+      document.getElementById('grassBar').parentElement.parentElement.style.display='none';
+      document.getElementById('barrenBar').parentElement.parentElement.style.display='none';
+      document.getElementById('bgBar').parentElement.parentElement.style.display='none';
+      d.class_stats.forEach(c=>{
+        const row=document.createElement('div');
+        row.className='bar';
+        row.innerHTML='<div class="barhead"><b>'+c.id+' · '+c.label+'</b><span>'+pct(c.pct)+'</span></div><div class="track"><div class="fill" style="width:'+c.pct+'%;background:'+c.color+'"></div></div>';
+        dynamic.appendChild(row);
+      });
+    }else{
+      classesInfo.textContent='Background / Grassland / Barren';
+      document.getElementById('grassBar').parentElement.parentElement.style.display='';
+      document.getElementById('barrenBar').parentElement.parentElement.style.display='';
+      document.getElementById('bgBar').parentElement.parentElement.style.display='';
+    }
     if(d.validation_miou!=null)document.getElementById('miou').textContent=pct(d.validation_miou*100);
     pf.style.width='100%';show('overlay');
   }catch(e){alert(e.message);document.getElementById('mode').value='分析失敗'}finally{setTimeout(()=>p.classList.add('hidden'),700);analyze.disabled=false}
