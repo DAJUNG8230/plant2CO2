@@ -28,6 +28,7 @@ MODEL_CONFIG = {
     "segformer": {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
+        "expected_num_classes": 11,
         "paths": [
             MODELS_DIR / "best_model_segformer",
             MODELS_DIR / "segformer_best",
@@ -36,11 +37,20 @@ MODEL_CONFIG = {
     },
 }
 
+# 11-class palette. DeepLabV3+ / U-Net still use the first 3 entries.
 CLASS_COLORS = np.array(
     [
-        [71, 85, 105],   # Background
-        [23, 143, 89],   # Grassland
-        [154, 103, 64],  # Barren
+        [71, 85, 105],    # 0
+        [23, 143, 89],    # 1
+        [154, 103, 64],   # 2
+        [37, 99, 235],    # 3
+        [234, 179, 8],    # 4
+        [168, 85, 247],   # 5
+        [236, 72, 153],   # 6
+        [6, 182, 212],    # 7
+        [249, 115, 22],   # 8
+        [132, 204, 22],   # 9
+        [239, 68, 68],    # 10
     ],
     dtype=np.uint8,
 )
@@ -141,9 +151,8 @@ def _load_segformer(model_path):
 
     if not model_path.is_dir():
         raise ValueError(
-            "SegFormer 建議使用 Hugging Face save_pretrained() 資料夾格式。"
-            "請將 config.json、model.safetensors、preprocessor_config.json "
-            "放在 models/best_model_segformer/。"
+            "SegFormer 請使用 Hugging Face save_pretrained() 資料夾格式，"
+            "並放在 models/best_model_segformer/。"
         )
 
     required = [
@@ -173,18 +182,27 @@ def _load_segformer(model_path):
         local_files_only=True,
     )
 
+    if int(model.config.num_labels) != 11:
+        raise ValueError(
+            f"目前網站設定 SegFormer 必須是 11 類，"
+            f"但 config.json 的 num_labels = {model.config.num_labels}"
+        )
+
     model.to(DEVICE)
     model.eval()
 
-    config = model.config
+    raw_id2label = dict(model.config.id2label or {})
     id2label = {
-        int(k): v for k, v in dict(config.id2label or {}).items()
+        int(k): str(v)
+        for k, v in raw_id2label.items()
     }
+    if not id2label:
+        id2label = {i: f"Class {i}" for i in range(11)}
 
     _PROCESSORS["segformer"] = processor
     _MODEL_META["segformer"] = {
-        "encoder": getattr(config, "model_type", "segformer"),
-        "num_classes": int(config.num_labels),
+        "encoder": getattr(model.config, "model_type", "segformer"),
+        "num_classes": 11,
         "image_size": None,
         "best_miou": None,
         "checkpoint_path": str(model_path),
@@ -293,9 +311,8 @@ def _predict_segformer(rgb):
 
     with torch.inference_mode():
         outputs = model(**inputs)
-        logits = outputs.logits
         logits = F.interpolate(
-            logits,
+            outputs.logits,
             size=rgb.shape[:2],
             mode="bilinear",
             align_corners=False,
@@ -326,15 +343,16 @@ def predict_with_model(rgb, model_name):
     return mask.cpu().numpy().astype(np.uint8)
 
 
-def _save_visuals(rgb, mask, output_dir, job_id, model_name):
-    if int(mask.max()) >= len(CLASS_COLORS):
-        raise ValueError(
-            "模型輸出的 class id 超出網站目前的 3 類設定。"
-            "請確認模型類別順序為 "
-            "0=Background, 1=Grassland, 2=Barren。"
-        )
+def _color_for_class(class_id):
+    if class_id < len(CLASS_COLORS):
+        return CLASS_COLORS[class_id]
+    return np.array([120, 120, 120], dtype=np.uint8)
 
-    color_mask = CLASS_COLORS[mask]
+
+def _save_visuals(rgb, mask, output_dir, job_id, model_name):
+    max_id = int(mask.max())
+    palette = np.stack([_color_for_class(i) for i in range(max_id + 1)])
+    color_mask = palette[mask]
 
     mask_filename = f"{job_id}_{model_name}_mask.png"
     overlay_filename = f"{job_id}_{model_name}_overlay.png"
@@ -348,6 +366,41 @@ def _save_visuals(rgb, mask, output_dir, job_id, model_name):
 
     Image.fromarray(overlay).save(output_dir / overlay_filename)
     return mask_filename, overlay_filename
+
+
+def _find_class_id(id2label, keywords):
+    for class_id, label in id2label.items():
+        text = str(label).strip().lower()
+        for keyword in keywords:
+            if keyword in text:
+                return int(class_id)
+    return None
+
+
+def _build_class_stats(mask, id2label, num_classes):
+    counts = np.bincount(mask.reshape(-1), minlength=num_classes)
+    total = int(mask.size)
+    stats = []
+
+    for class_id in range(num_classes):
+        label = id2label.get(class_id, f"Class {class_id}")
+        color = _color_for_class(class_id)
+        pixels = int(counts[class_id])
+        pct = pixels / total * 100.0 if total else 0.0
+
+        stats.append({
+            "id": class_id,
+            "label": label,
+            "pixels": pixels,
+            "pct": round(pct, 4),
+            "color": "#{:02X}{:02X}{:02X}".format(
+                int(color[0]),
+                int(color[1]),
+                int(color[2]),
+            ),
+        })
+
+    return stats
 
 
 def get_runtime_status():
@@ -408,16 +461,52 @@ def analyze_image(
     if mask.shape != rgb.shape[:2]:
         raise ValueError("模型輸出的 mask 尺寸與原始影像不一致")
 
-    counts = np.bincount(mask.reshape(-1), minlength=3)
-    background_pixels, grassland_pixels, barren_pixels = map(
-        int,
-        counts[:3],
+    meta = _MODEL_META.get(model_name, {})
+    num_classes = int(meta.get("num_classes", 3))
+    id2label = meta.get(
+        "id2label",
+        {0: "Background", 1: "Grassland", 2: "Barren"},
     )
-    total_pixels = int(mask.size)
 
-    grassland_pct = grassland_pixels / total_pixels * 100.0
-    barren_pct = barren_pixels / total_pixels * 100.0
-    background_pct = background_pixels / total_pixels * 100.0
+    if mode != "model":
+        num_classes = 3
+        id2label = {0: "Background", 1: "Grassland", 2: "Barren"}
+
+    class_stats = _build_class_stats(
+        mask,
+        id2label,
+        num_classes,
+    )
+
+    # Keep the original 3-class API fields for DeepLabV3+ / U-Net.
+    background_id = _find_class_id(
+        id2label,
+        ["background", "背景"],
+    )
+    grassland_id = _find_class_id(
+        id2label,
+        ["grassland", "grass", "草地", "草坪"],
+    )
+    barren_id = _find_class_id(
+        id2label,
+        ["barren", "bare", "裸地"],
+    )
+
+    def class_pct(class_id):
+        if class_id is None or class_id >= len(class_stats):
+            return 0.0
+        return float(class_stats[class_id]["pct"])
+
+    def class_pixels(class_id):
+        if class_id is None or class_id >= len(class_stats):
+            return 0
+        return int(class_stats[class_id]["pixels"])
+
+    background_pct = class_pct(background_id)
+    grassland_pct = class_pct(grassland_id)
+    barren_pct = class_pct(barren_id)
+
+    grassland_pixels = class_pixels(grassland_id)
 
     m_per_pixel = gsd_cm_per_pixel / 100.0
     vegetation_area_m2 = grassland_pixels * (m_per_pixel ** 2)
@@ -431,7 +520,6 @@ def analyze_image(
         model_name,
     )
 
-    meta = _MODEL_META.get(model_name, {})
     config = MODEL_CONFIG[model_name]
 
     return {
@@ -440,20 +528,19 @@ def analyze_image(
         "model": config["display_name"],
         "encoder": meta.get("encoder", config["default_encoder"]),
         "device": str(DEVICE),
+        "num_classes": num_classes,
         "validation_miou": (
             meta.get("best_miou")
             if mode == "model"
             else None
         ),
-        "id2label": meta.get("id2label"),
+        "id2label": id2label,
+        "class_stats": class_stats,
         "model_error": model_error,
         "width": image.width,
         "height": image.height,
         "gsd_cm_per_pixel": gsd_cm_per_pixel,
         "carbon_coefficient": carbon_coefficient,
-        "background_pixels": background_pixels,
-        "grassland_pixels": grassland_pixels,
-        "barren_pixels": barren_pixels,
         "background_pct": round(background_pct, 4),
         "grassland_pct": round(grassland_pct, 4),
         "barren_pct": round(barren_pct, 4),
