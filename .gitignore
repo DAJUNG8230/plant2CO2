@@ -20,6 +20,8 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
+mask_checks/
+outputs_training/
 
 # Training data / Label Studio exports
 dataset/
@@ -32,6 +34,7 @@ export.json
 models/*.pth
 models/*.pt
 models/*.ckpt
+models/best_model_segformer/
 !models/README.md
 
 # Logs
