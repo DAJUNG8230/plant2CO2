@@ -33,8 +33,9 @@ VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
 IMAGE_SIZE = 512
 BATCH_SIZE = 2
-EPOCHS = 20
+EPOCHS = 50
 LEARNING_RATE = 1e-4
+EARLY_STOPPING_PATIENCE = 8
 
 USE_FLAIR = True
 USE_LABEL_STUDIO = True
@@ -157,9 +158,26 @@ def load_pair(image_path, mask_path, augment):
         if random.random() < 0.5:
             image = torch.flip(image, dims=[1])
             mask = torch.flip(mask, dims=[0])
+
         k = random.randint(0, 3)
         image = torch.rot90(image, k, dims=[1, 2])
         mask = torch.rot90(mask, k, dims=[0, 1])
+
+        if random.random() < 0.8:
+            image = TF.adjust_brightness(
+                image,
+                random.uniform(0.85, 1.15),
+            )
+        if random.random() < 0.8:
+            image = TF.adjust_contrast(
+                image,
+                random.uniform(0.85, 1.15),
+            )
+        if random.random() < 0.6:
+            image = TF.adjust_saturation(
+                image,
+                random.uniform(0.85, 1.15),
+            )
 
     image = TF.normalize(
         image,
@@ -208,6 +226,65 @@ def calculate_iou(confusion_matrix):
 def safe_mean(values):
     valid = ~torch.isnan(values)
     return values[valid].mean().item() if valid.any() else 0.0
+
+
+def compute_class_weights(dataset):
+    print("\nComputing automatic class weights...")
+    counts = torch.zeros(NUM_CLASSES, dtype=torch.float64)
+
+    for index in tqdm(
+        range(len(dataset)),
+        desc="Class statistics",
+    ):
+        _, mask = dataset[index]
+        valid = (
+            (mask >= 0)
+            & (mask < NUM_CLASSES)
+            & (mask != IGNORE_INDEX)
+        )
+        if valid.any():
+            values = torch.bincount(
+                mask[valid].reshape(-1),
+                minlength=NUM_CLASSES,
+            ).double()
+            counts += values
+
+    counts = torch.clamp(counts, min=1.0)
+    frequencies = counts / counts.sum()
+
+    weights = torch.sqrt(
+        frequencies.mean() / frequencies
+    )
+    weights = torch.clamp(weights, min=0.5, max=3.0)
+    weights = weights / weights.mean()
+
+    print("Class pixel distribution / weights:")
+    for i, name in enumerate(CLASS_NAMES):
+        print(
+            f"  {i} {name:<16} "
+            f"{frequencies[i].item() * 100:6.2f}%  "
+            f"weight={weights[i].item():.3f}"
+        )
+
+    return weights.float()
+
+
+def save_confusion_matrix(cm, epoch):
+    cm = cm.detach().cpu().numpy().astype(np.int64)
+    path = OUTPUT_DIR / f"confusion_matrix_epoch_{epoch:03d}.csv"
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["GT / Pred", *CLASS_NAMES])
+        for i, name in enumerate(CLASS_NAMES):
+            writer.writerow([name, *cm[i].tolist()])
+
+    latest = OUTPUT_DIR / "confusion_matrix_latest.csv"
+    with open(latest, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["GT / Pred", *CLASS_NAMES])
+        for i, name in enumerate(CLASS_NAMES):
+            writer.writerow([name, *cm[i].tolist()])
 
 
 def build_datasets():
@@ -311,8 +388,11 @@ def main():
         classes=NUM_CLASSES,
     ).to(DEVICE)
 
+    class_weights = compute_class_weights(train_dataset).to(DEVICE)
+
     cross_entropy = torch.nn.CrossEntropyLoss(
-        ignore_index=IGNORE_INDEX
+        weight=class_weights,
+        ignore_index=IGNORE_INDEX,
     )
 
     optimizer = torch.optim.AdamW(
@@ -328,6 +408,7 @@ def main():
     )
 
     best_vegetation_miou = -1.0
+    epochs_without_improvement = 0
     history_path = OUTPUT_DIR / "history.csv"
 
     history_header = [
@@ -437,6 +518,12 @@ def main():
             f"mIoU (vegetation): "
             f"{miou_vegetation * 100:.2f}%"
         )
+        print(
+            "Learning rate:",
+            optimizer.param_groups[0]["lr"],
+        )
+
+        save_confusion_matrix(cm, epoch)
 
         with open(
             history_path,
@@ -453,8 +540,9 @@ def main():
                 miou_vegetation,
             ])
 
-        if miou_vegetation > best_vegetation_miou:
+        if miou_vegetation > best_vegetation_miou + 1e-4:
             best_vegetation_miou = miou_vegetation
+            epochs_without_improvement = 0
 
             torch.save(
                 {
@@ -470,6 +558,20 @@ def main():
             )
 
             print("Saved best model.")
+        else:
+            epochs_without_improvement += 1
+            print(
+                "No vegetation mIoU improvement: "
+                f"{epochs_without_improvement}/"
+                f"{EARLY_STOPPING_PATIENCE}"
+            )
+
+        if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+            print(
+                "\nEarly stopping: vegetation mIoU "
+                "has not improved."
+            )
+            break
 
     print("\nTraining finished.")
     print(
