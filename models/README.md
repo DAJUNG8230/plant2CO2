@@ -1,6 +1,28 @@
 # models
 
-網站目前支援三種模型：
+目前網站與模型統一使用 6 類土地覆蓋分類：
+
+```text
+0 = Bare Soil
+1 = Other Non-Veg
+2 = Herbaceous
+3 = Shrub
+4 = Trees
+5 = Cultivated
+```
+
+植被類別為：
+
+```text
+2 = Herbaceous
+3 = Shrub
+4 = Trees
+5 = Cultivated
+```
+
+網站中的「植被覆蓋率、植被面積、碳匯估算」會加總 2、3、4、5 類。
+
+## 模型檔案
 
 ```text
 models/
@@ -14,79 +36,51 @@ models/
 
 ## DeepLabV3+ / U-Net
 
-DeepLabV3+ 與 U-Net 目前維持 3 類：
+checkpoint 必須使用 6 個輸出類別，且 class order 必須與上述 0~5 完全一致。
 
-```text
-0 = Background
-1 = Grassland
-2 = Barren
+建議 checkpoint metadata：
+
+```python
+{
+    "model_state_dict": model.state_dict(),
+    "num_classes": 6,
+    "class_names": [
+        "Bare Soil",
+        "Other Non-Veg",
+        "Herbaceous",
+        "Shrub",
+        "Trees",
+        "Cultivated",
+    ],
+    "image_size": 512,
+    "best_miou": best_miou,
+}
 ```
 
 ## SegFormer
 
-SegFormer 現在改成 **11 類**。
-
-網站會直接從：
+SegFormer 的 `config.json` 必須設定：
 
 ```text
-models/best_model_segformer/config.json
+num_labels = 6
 ```
 
-讀取：
+並建議：
 
-```text
-num_labels
-id2label
-label2id
+```json
+"id2label": {
+  "0": "Bare Soil",
+  "1": "Other Non-Veg",
+  "2": "Herbaceous",
+  "3": "Shrub",
+  "4": "Trees",
+  "5": "Cultivated"
+}
 ```
 
-並使用：
+網站會直接使用 `SegformerImageProcessor` 與 `SegformerForSemanticSegmentation` 載入本機 Hugging Face 模型。
 
-```python
-SegformerForSemanticSegmentation.from_pretrained(...)
-SegformerImageProcessor.from_pretrained(...)
-```
+## 重要
 
-載入：
-
-```text
-config.json
-model.safetensors
-preprocessor_config.json
-```
-
-網站會驗證：
-
-```text
-num_labels = 11
-```
-
-如果模型不是 11 類會直接提示錯誤。
-
-### 網頁顯示
-
-選擇 SegFormer 時，土地覆蓋分析會改為動態顯示 11 個類別的：
-
-- Class ID
-- 類別名稱
-- Pixel 比例
-- 對應顏色
-
-類別名稱直接使用 SegFormer 的 `config.json -> id2label`，因此不需要在網站程式中手動寫死 11 個名稱。
-
-### 碳匯
-
-目前碳匯仍以 Grassland 類別計算。網站會從 `id2label` 自動尋找名稱包含：
-
-```text
-Grassland
-Grass
-草地
-草坪
-```
-
-的類別。
-
-因此若你的 11 類使用其他名稱，需再指定哪些 Class ID 應納入「植被面積」與碳匯計算。
-
-模型資料夾與大型權重不建議提交 GitHub。
+舊的 3 類或 11 類模型不能直接當成新的 6 類模型使用。
+必須重新訓練，或取得已按照這 6 類訓練完成的 checkpoint。
