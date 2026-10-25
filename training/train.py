@@ -13,8 +13,17 @@ from torchvision.transforms import InterpolationMode
 import segmentation_models_pytorch as smp
 from tqdm import tqdm
 
-NUM_CLASSES = 3
-CLASS_NAMES = ["Background", "Grassland", "Barren"]
+NUM_CLASSES = 6
+CLASS_NAMES = [
+    "Bare Soil",
+    "Other Non-Veg",
+    "Herbaceous",
+    "Shrub",
+    "Trees",
+    "Cultivated",
+]
+VEGETATION_CLASS_IDS = [2, 3, 4, 5]
+
 IMAGE_SIZE = 512
 BATCH_SIZE = 2
 EPOCHS = 50
@@ -57,7 +66,16 @@ class SegmentationDataset(Dataset):
         )
 
         image = TF.to_tensor(image)
-        mask = torch.from_numpy(np.asarray(mask, dtype=np.int64).copy())
+        mask = torch.from_numpy(
+            np.asarray(mask, dtype=np.int64).copy()
+        )
+
+        unique = torch.unique(mask)
+        if torch.any((unique < 0) | (unique >= NUM_CLASSES)):
+            raise ValueError(
+                f"{mask_path} 出現非法 class id: {unique.tolist()}，"
+                "六類模型只允許 0~5。"
+            )
 
         if self.augment:
             if random.random() < 0.5:
@@ -82,15 +100,22 @@ def calculate_iou(confusion_matrix):
     cm = confusion_matrix.float().cpu()
     intersection = torch.diag(cm)
     union = cm.sum(1) + cm.sum(0) - intersection
-
     iou = torch.full((NUM_CLASSES,), float("nan"))
     valid = union > 0
     iou[valid] = intersection[valid] / union[valid]
     return iou
 
 
+def safe_mean(values):
+    valid = ~torch.isnan(values)
+    return values[valid].mean().item() if valid.any() else 0.0
+
+
 def main():
     print("Device:", DEVICE)
+    print("Classes:")
+    for i, name in enumerate(CLASS_NAMES):
+        print(f"  {i}: {name}")
 
     train_dataset = SegmentationDataset(
         "dataset/train/images",
@@ -126,7 +151,10 @@ def main():
     ).to(DEVICE)
 
     cross_entropy = torch.nn.CrossEntropyLoss()
-    dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)
+    dice_loss = smp.losses.DiceLoss(
+        mode="multiclass",
+        from_logits=True,
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -140,21 +168,29 @@ def main():
         patience=5,
     )
 
-    best_miou = -1.0
+    best_vegetation_miou = -1.0
     history_path = OUTPUT_DIR / "history.csv"
 
+    history_header = [
+        "epoch",
+        "train_loss",
+        "val_loss",
+        *[name.lower().replace(" ", "_") + "_iou" for name in CLASS_NAMES],
+        "miou_all",
+        "miou_vegetation",
+    ]
+
     with open(history_path, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow([
-            "epoch", "train_loss", "val_loss",
-            "background_iou", "grassland_iou", "barren_iou",
-            "miou_all", "miou_foreground",
-        ])
+        csv.writer(f).writerow(history_header)
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
 
-        for images, masks in tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS} Train"):
+        for images, masks in tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{EPOCHS} Train",
+        ):
             images = images.to(DEVICE)
             masks = masks.to(DEVICE)
 
@@ -192,7 +228,10 @@ def main():
 
                 predictions = torch.argmax(outputs, dim=1)
                 valid = (masks >= 0) & (masks < NUM_CLASSES)
-                indexes = NUM_CLASSES * masks[valid] + predictions[valid]
+                indexes = (
+                    NUM_CLASSES * masks[valid]
+                    + predictions[valid]
+                )
                 cm += torch.bincount(
                     indexes,
                     minlength=NUM_CLASSES * NUM_CLASSES,
@@ -202,45 +241,57 @@ def main():
         scheduler.step(val_loss)
 
         ious = calculate_iou(cm)
-        valid_all = ~torch.isnan(ious)
-        miou_all = ious[valid_all].mean().item()
-
-        foreground = ious[1:]
-        valid_fg = ~torch.isnan(foreground)
-        miou_fg = foreground[valid_fg].mean().item()
+        miou_all = safe_mean(ious)
+        vegetation_ious = ious[VEGETATION_CLASS_IDS]
+        miou_vegetation = safe_mean(vegetation_ious)
 
         print(f"\nEpoch {epoch}")
         print(f"Train Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_loss:.4f}")
         for i, name in enumerate(CLASS_NAMES):
             print(f"{name} IoU: {ious[i].item():.4f}")
-        print(f"mIoU (all): {miou_all:.4f}")
-        print(f"mIoU (foreground): {miou_fg:.4f}")
+        print(f"mIoU (all 6 classes): {miou_all:.4f}")
+        print(
+            "mIoU (vegetation 2/3/4/5): "
+            f"{miou_vegetation:.4f}"
+        )
 
-        with open(history_path, "a", newline="", encoding="utf-8") as f:
+        with open(
+            history_path,
+            "a",
+            newline="",
+            encoding="utf-8",
+        ) as f:
             csv.writer(f).writerow([
-                epoch, train_loss, val_loss,
-                ious[0].item(), ious[1].item(), ious[2].item(),
-                miou_all, miou_fg,
+                epoch,
+                train_loss,
+                val_loss,
+                *[x.item() for x in ious],
+                miou_all,
+                miou_vegetation,
             ])
 
-        if miou_fg > best_miou:
-            best_miou = miou_fg
+        if miou_vegetation > best_vegetation_miou:
+            best_vegetation_miou = miou_vegetation
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
                     "encoder": "resnet50",
                     "num_classes": NUM_CLASSES,
                     "class_names": CLASS_NAMES,
+                    "vegetation_class_ids": VEGETATION_CLASS_IDS,
                     "image_size": IMAGE_SIZE,
-                    "best_miou": best_miou,
+                    "best_miou": best_vegetation_miou,
                 },
                 OUTPUT_DIR / "best_model.pth",
             )
             print("Saved best model.")
 
     print("Training finished.")
-    print("Best foreground mIoU:", best_miou)
+    print(
+        "Best vegetation mIoU:",
+        best_vegetation_miou,
+    )
 
 
 if __name__ == "__main__":
