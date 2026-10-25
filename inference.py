@@ -11,6 +11,29 @@ BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+CLASS_NAMES = [
+    "Bare Soil",
+    "Other Non-Veg",
+    "Herbaceous",
+    "Shrub",
+    "Trees",
+    "Cultivated",
+]
+NUM_CLASSES = 6
+VEGETATION_CLASS_IDS = [2, 3, 4, 5]
+
+CLASS_COLORS = np.array(
+    [
+        [154, 103, 64],   # Bare Soil
+        [100, 116, 139],  # Other Non-Veg
+        [132, 204, 22],   # Herbaceous
+        [22, 163, 74],    # Shrub
+        [21, 128, 61],    # Trees
+        [234, 179, 8],    # Cultivated
+    ],
+    dtype=np.uint8,
+)
+
 MODEL_CONFIG = {
     "deeplabv3plus": {
         "display_name": "DeepLabV3+",
@@ -28,7 +51,6 @@ MODEL_CONFIG = {
     "segformer": {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
-        "expected_num_classes": 11,
         "paths": [
             MODELS_DIR / "best_model_segformer",
             MODELS_DIR / "segformer_best",
@@ -37,59 +59,10 @@ MODEL_CONFIG = {
     },
 }
 
-# 11-class palette. DeepLabV3+ / U-Net still use the first 3 entries.
-CLASS_COLORS = np.array(
-    [
-        [71, 85, 105],    # 0
-        [23, 143, 89],    # 1
-        [154, 103, 64],   # 2
-        [37, 99, 235],    # 3
-        [234, 179, 8],    # 4
-        [168, 85, 247],   # 5
-        [236, 72, 153],   # 6
-        [6, 182, 212],    # 7
-        [249, 115, 22],   # 8
-        [132, 204, 22],   # 9
-        [239, 68, 68],    # 10
-    ],
-    dtype=np.uint8,
-)
-
 _MODELS = {}
 _PROCESSORS = {}
 _MODEL_META = {}
 _MODEL_MTIMES = {}
-
-
-def _demo_segmentation(rgb):
-    arr = rgb.astype(np.float32)
-    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
-    brightness = (r + g + b) / 3.0
-
-    mask = np.zeros(r.shape, dtype=np.uint8)
-
-    grass = (
-        (brightness >= 28)
-        & (brightness <= 242)
-        & (g > r * 1.08)
-        & (g > b * 1.06)
-        & ((g - r) > 10)
-    )
-
-    barren = (
-        (brightness >= 28)
-        & (brightness <= 242)
-        & (~grass)
-        & (r > b * 1.05)
-        & (r >= g * 0.92)
-        & ((r - g) < 55)
-        & (r > 70)
-        & (g > 45)
-    )
-
-    mask[grass] = 1
-    mask[barren] = 2
-    return mask
 
 
 def _get_model_path(model_name):
@@ -102,7 +75,6 @@ def _get_model_path(model_name):
 def _path_mtime(path):
     if path.is_file():
         return path.stat().st_mtime
-
     mtimes = [path.stat().st_mtime]
     for child in path.rglob("*"):
         if child.is_file():
@@ -125,7 +97,6 @@ def _build_smp_model(model_name, encoder, num_classes):
             in_channels=3,
             classes=num_classes,
         )
-
     if model_name == "unet":
         return smp.Unet(
             encoder_name=encoder,
@@ -133,7 +104,6 @@ def _build_smp_model(model_name, encoder, num_classes):
             in_channels=3,
             classes=num_classes,
         )
-
     raise ValueError(f"未知 SMP 模型：{model_name}")
 
 
@@ -145,14 +115,13 @@ def _load_segformer(model_path):
         )
     except ImportError as exc:
         raise ImportError(
-            "SegFormer 需要 transformers 套件，請執行 "
+            "SegFormer 需要 transformers，請執行 "
             "python -m pip install -r requirements.txt"
         ) from exc
 
     if not model_path.is_dir():
         raise ValueError(
-            "SegFormer 請使用 Hugging Face save_pretrained() 資料夾格式，"
-            "並放在 models/best_model_segformer/。"
+            "SegFormer 請使用 Hugging Face save_pretrained() 資料夾格式"
         )
 
     required = [
@@ -182,10 +151,10 @@ def _load_segformer(model_path):
         local_files_only=True,
     )
 
-    if int(model.config.num_labels) != 11:
+    if int(model.config.num_labels) != NUM_CLASSES:
         raise ValueError(
-            f"目前網站設定 SegFormer 必須是 11 類，"
-            f"但 config.json 的 num_labels = {model.config.num_labels}"
+            f"SegFormer 必須是 {NUM_CLASSES} 類，"
+            f"目前 config.json num_labels={model.config.num_labels}"
         )
 
     model.to(DEVICE)
@@ -196,19 +165,18 @@ def _load_segformer(model_path):
         int(k): str(v)
         for k, v in raw_id2label.items()
     }
-    if not id2label:
-        id2label = {i: f"Class {i}" for i in range(11)}
+    if len(id2label) != NUM_CLASSES:
+        id2label = {i: name for i, name in enumerate(CLASS_NAMES)}
 
     _PROCESSORS["segformer"] = processor
     _MODEL_META["segformer"] = {
         "encoder": getattr(model.config, "model_type", "segformer"),
-        "num_classes": 11,
+        "num_classes": NUM_CLASSES,
         "image_size": None,
         "best_miou": None,
         "checkpoint_path": str(model_path),
         "id2label": id2label,
     }
-
     return model
 
 
@@ -236,26 +204,25 @@ def load_model(model_name):
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         state_dict = checkpoint["model_state_dict"]
         encoder = checkpoint.get("encoder", config["default_encoder"])
-        num_classes = int(checkpoint.get("num_classes", 3))
+        num_classes = int(checkpoint.get("num_classes", NUM_CLASSES))
         image_size = int(checkpoint.get("image_size", 512))
         best_miou = checkpoint.get("best_miou")
-        class_names = checkpoint.get(
-            "class_names",
-            ["Background", "Grassland", "Barren"],
-        )
+        class_names = checkpoint.get("class_names", CLASS_NAMES)
     else:
         state_dict = checkpoint
         encoder = config["default_encoder"]
-        num_classes = 3
+        num_classes = NUM_CLASSES
         image_size = 512
         best_miou = None
-        class_names = ["Background", "Grassland", "Barren"]
+        class_names = CLASS_NAMES
 
-    model = _build_smp_model(
-        model_name=model_name,
-        encoder=encoder,
-        num_classes=num_classes,
-    )
+    if num_classes != NUM_CLASSES:
+        raise ValueError(
+            f"{config['display_name']} checkpoint 是 {num_classes} 類，"
+            f"目前網站需要 {NUM_CLASSES} 類，請換成重新訓練的模型。"
+        )
+
+    model = _build_smp_model(model_name, encoder, num_classes)
     model.load_state_dict(state_dict, strict=True)
     model.to(DEVICE)
     model.eval()
@@ -270,7 +237,6 @@ def load_model(model_name):
         "checkpoint_path": str(model_path),
         "id2label": {i: name for i, name in enumerate(class_names)},
     }
-
     return model
 
 
@@ -281,33 +247,25 @@ def _prepare_tensor(rgb, image_size):
     )
     array = np.asarray(image, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
-
     mean = torch.tensor(
         [0.485, 0.456, 0.406],
         dtype=tensor.dtype,
     ).view(1, 3, 1, 1)
-
     std = torch.tensor(
         [0.229, 0.224, 0.225],
         dtype=tensor.dtype,
     ).view(1, 3, 1, 1)
-
     return ((tensor - mean) / std).to(DEVICE)
 
 
 def _predict_segformer(rgb):
     model = load_model("segformer")
     processor = _PROCESSORS["segformer"]
-
-    image = Image.fromarray(rgb)
     inputs = processor(
-        images=image,
+        images=Image.fromarray(rgb),
         return_tensors="pt",
     )
-    inputs = {
-        key: value.to(DEVICE)
-        for key, value in inputs.items()
-    }
+    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
 
     with torch.inference_mode():
         outputs = model(**inputs)
@@ -343,17 +301,11 @@ def predict_with_model(rgb, model_name):
     return mask.cpu().numpy().astype(np.uint8)
 
 
-def _color_for_class(class_id):
-    if class_id < len(CLASS_COLORS):
-        return CLASS_COLORS[class_id]
-    return np.array([120, 120, 120], dtype=np.uint8)
-
-
 def _save_visuals(rgb, mask, output_dir, job_id, model_name):
-    max_id = int(mask.max())
-    palette = np.stack([_color_for_class(i) for i in range(max_id + 1)])
-    color_mask = palette[mask]
+    if int(mask.max()) >= NUM_CLASSES:
+        raise ValueError("模型輸出出現 0~5 以外的 class id")
 
+    color_mask = CLASS_COLORS[mask]
     mask_filename = f"{job_id}_{model_name}_mask.png"
     overlay_filename = f"{job_id}_{model_name}_overlay.png"
 
@@ -363,49 +315,34 @@ def _save_visuals(rgb, mask, output_dir, job_id, model_name):
         rgb.astype(np.float32) * 0.58
         + color_mask.astype(np.float32) * 0.42
     ).clip(0, 255).astype(np.uint8)
-
     Image.fromarray(overlay).save(output_dir / overlay_filename)
+
     return mask_filename, overlay_filename
 
 
-def _find_class_id(id2label, keywords):
-    for class_id, label in id2label.items():
-        text = str(label).strip().lower()
-        for keyword in keywords:
-            if keyword in text:
-                return int(class_id)
-    return None
-
-
-def _build_class_stats(mask, id2label, num_classes):
-    counts = np.bincount(mask.reshape(-1), minlength=num_classes)
+def _build_class_stats(mask, id2label):
+    counts = np.bincount(mask.reshape(-1), minlength=NUM_CLASSES)
     total = int(mask.size)
     stats = []
 
-    for class_id in range(num_classes):
-        label = id2label.get(class_id, f"Class {class_id}")
-        color = _color_for_class(class_id)
+    for class_id in range(NUM_CLASSES):
+        color = CLASS_COLORS[class_id]
         pixels = int(counts[class_id])
         pct = pixels / total * 100.0 if total else 0.0
-
         stats.append({
             "id": class_id,
-            "label": label,
+            "label": id2label.get(class_id, CLASS_NAMES[class_id]),
             "pixels": pixels,
             "pct": round(pct, 4),
-            "color": "#{:02X}{:02X}{:02X}".format(
-                int(color[0]),
-                int(color[1]),
-                int(color[2]),
-            ),
+            "color": "#{:02X}{:02X}{:02X}".format(*map(int, color)),
+            "is_vegetation": class_id in VEGETATION_CLASS_IDS,
         })
 
-    return stats
+    return stats, counts
 
 
 def get_runtime_status():
     models = {}
-
     for name, config in MODEL_CONFIG.items():
         path = _get_model_path(name)
         models[name] = {
@@ -424,6 +361,8 @@ def get_runtime_status():
             if torch.cuda.is_available()
             else None
         ),
+        "class_names": CLASS_NAMES,
+        "vegetation_class_ids": VEGETATION_CLASS_IDS,
         "models": models,
     }
 
@@ -444,72 +383,32 @@ def analyze_image(
     image = Image.open(image_path).convert("RGB")
     rgb = np.asarray(image)
 
-    model_error = None
-
-    if _get_model_path(model_name) is not None:
-        try:
-            mask = predict_with_model(rgb, model_name)
-            mode = "model"
-        except Exception as exc:
-            mask = _demo_segmentation(rgb)
-            mode = "demo_fallback"
-            model_error = str(exc)
-    else:
-        mask = _demo_segmentation(rgb)
-        mode = "demo"
-
+    mask = predict_with_model(rgb, model_name)
     if mask.shape != rgb.shape[:2]:
         raise ValueError("模型輸出的 mask 尺寸與原始影像不一致")
 
     meta = _MODEL_META.get(model_name, {})
-    num_classes = int(meta.get("num_classes", 3))
     id2label = meta.get(
         "id2label",
-        {0: "Background", 1: "Grassland", 2: "Barren"},
+        {i: name for i, name in enumerate(CLASS_NAMES)},
     )
 
-    if mode != "model":
-        num_classes = 3
-        id2label = {0: "Background", 1: "Grassland", 2: "Barren"}
+    class_stats, counts = _build_class_stats(mask, id2label)
 
-    class_stats = _build_class_stats(
-        mask,
-        id2label,
-        num_classes,
+    total_pixels = int(mask.size)
+    vegetation_pixels = int(
+        sum(counts[i] for i in VEGETATION_CLASS_IDS)
+    )
+    vegetation_pct = (
+        vegetation_pixels / total_pixels * 100.0
+        if total_pixels
+        else 0.0
     )
 
-    # Keep the original 3-class API fields for DeepLabV3+ / U-Net.
-    background_id = _find_class_id(
-        id2label,
-        ["background", "背景"],
+    meters_per_pixel = gsd_cm_per_pixel / 100.0
+    vegetation_area_m2 = (
+        vegetation_pixels * (meters_per_pixel ** 2)
     )
-    grassland_id = _find_class_id(
-        id2label,
-        ["grassland", "grass", "草地", "草坪"],
-    )
-    barren_id = _find_class_id(
-        id2label,
-        ["barren", "bare", "裸地"],
-    )
-
-    def class_pct(class_id):
-        if class_id is None or class_id >= len(class_stats):
-            return 0.0
-        return float(class_stats[class_id]["pct"])
-
-    def class_pixels(class_id):
-        if class_id is None or class_id >= len(class_stats):
-            return 0
-        return int(class_stats[class_id]["pixels"])
-
-    background_pct = class_pct(background_id)
-    grassland_pct = class_pct(grassland_id)
-    barren_pct = class_pct(barren_id)
-
-    grassland_pixels = class_pixels(grassland_id)
-
-    m_per_pixel = gsd_cm_per_pixel / 100.0
-    vegetation_area_m2 = grassland_pixels * (m_per_pixel ** 2)
     carbon_sink = vegetation_area_m2 * carbon_coefficient
 
     mask_filename, overlay_filename = _save_visuals(
@@ -523,27 +422,21 @@ def analyze_image(
     config = MODEL_CONFIG[model_name]
 
     return {
-        "mode": mode,
+        "mode": "model",
         "selected_model": model_name,
         "model": config["display_name"],
         "encoder": meta.get("encoder", config["default_encoder"]),
         "device": str(DEVICE),
-        "num_classes": num_classes,
-        "validation_miou": (
-            meta.get("best_miou")
-            if mode == "model"
-            else None
-        ),
+        "num_classes": NUM_CLASSES,
+        "validation_miou": meta.get("best_miou"),
         "id2label": id2label,
         "class_stats": class_stats,
-        "model_error": model_error,
         "width": image.width,
         "height": image.height,
         "gsd_cm_per_pixel": gsd_cm_per_pixel,
         "carbon_coefficient": carbon_coefficient,
-        "background_pct": round(background_pct, 4),
-        "grassland_pct": round(grassland_pct, 4),
-        "barren_pct": round(barren_pct, 4),
+        "vegetation_pixels": vegetation_pixels,
+        "vegetation_pct": round(vegetation_pct, 4),
         "vegetation_area_m2": round(vegetation_area_m2, 4),
         "carbon_sink_kg_co2e": round(carbon_sink, 4),
         "mask_filename": mask_filename,
