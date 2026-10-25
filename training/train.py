@@ -228,45 +228,66 @@ def safe_mean(values):
     return values[valid].mean().item() if valid.any() else 0.0
 
 
-def compute_class_weights(dataset):
-    print("\nComputing automatic class weights...")
-    counts = torch.zeros(NUM_CLASSES, dtype=torch.float64)
+def iter_mask_paths(dataset):
+    if isinstance(dataset, ConcatDataset):
+        for sub_dataset in dataset.datasets:
+            yield from iter_mask_paths(sub_dataset)
+        return
 
-    for index in tqdm(
-        range(len(dataset)),
+    if isinstance(dataset, ManifestDataset):
+        for _, mask_path in dataset.rows:
+            yield mask_path
+        return
+
+    if isinstance(dataset, SegmentationDataset):
+        for image_path in dataset.images:
+            yield dataset.mask_dir / f"{image_path.stem}.png"
+        return
+
+    raise TypeError(
+        f"不支援的 dataset 類型: {type(dataset).__name__}"
+    )
+
+
+def compute_class_weights(dataset):
+    print("\nComputing automatic class weights from masks...")
+    counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+    mask_paths = list(iter_mask_paths(dataset))
+
+    for mask_path in tqdm(
+        mask_paths,
         desc="Class statistics",
     ):
-        _, mask = dataset[index]
+        mask = np.asarray(Image.open(mask_path), dtype=np.int64)
         valid = (
             (mask >= 0)
             & (mask < NUM_CLASSES)
             & (mask != IGNORE_INDEX)
         )
-        if valid.any():
-            values = torch.bincount(
+        if np.any(valid):
+            counts += np.bincount(
                 mask[valid].reshape(-1),
                 minlength=NUM_CLASSES,
-            ).double()
-            counts += values
+            )
 
-    counts = torch.clamp(counts, min=1.0)
+    counts = np.maximum(counts, 1)
     frequencies = counts / counts.sum()
 
-    weights = torch.sqrt(
+    weights = np.sqrt(
         frequencies.mean() / frequencies
     )
-    weights = torch.clamp(weights, min=0.5, max=3.0)
+    weights = np.clip(weights, 0.5, 3.0)
     weights = weights / weights.mean()
 
     print("Class pixel distribution / weights:")
     for i, name in enumerate(CLASS_NAMES):
         print(
             f"  {i} {name:<16} "
-            f"{frequencies[i].item() * 100:6.2f}%  "
-            f"weight={weights[i].item():.3f}"
+            f"{frequencies[i] * 100:6.2f}%  "
+            f"weight={weights[i]:.3f}"
         )
 
-    return weights.float()
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def save_confusion_matrix(cm, epoch):
