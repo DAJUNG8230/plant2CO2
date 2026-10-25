@@ -12,9 +12,11 @@ OUT_IMAGE_DIR = Path("dataset/all/images")
 OUT_MASK_DIR = Path("dataset/all/masks")
 
 CLASS_MAP = {
-    "草地 (Grassland)": 1,
-    "裸地 (Barren)": 2,
+    "草地 (Grassland)": 2,  # Herbaceous
+    "裸地 (Barren)": 0,     # Bare Soil
 }
+
+IGNORE_INDEX = 255
 
 OUT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 OUT_MASK_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,7 +62,7 @@ for task in tasks:
     with Image.open(image_path) as img:
         image_width, image_height = img.size
 
-    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    mask = np.full((image_height, image_width), IGNORE_INDEX, dtype=np.uint8)
     found_mask = False
 
     for result in results:
