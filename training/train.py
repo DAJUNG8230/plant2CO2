@@ -5,6 +5,10 @@ import random
 import numpy as np
 from PIL import Image
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 try:
     import rasterio
 except ImportError:
@@ -42,7 +46,9 @@ USE_LABEL_STUDIO = True
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_DIR = Path("outputs_training")
+PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_image(path):
@@ -308,6 +314,127 @@ def save_confusion_matrix(cm, epoch):
             writer.writerow([name, *cm[i].tolist()])
 
 
+
+def calculate_weight_norm(model):
+    total = 0.0
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                total += parameter.detach().float().norm(2).item() ** 2
+    return total ** 0.5
+
+
+def calculate_grad_norm(model):
+    total = 0.0
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            total += parameter.grad.detach().float().norm(2).item() ** 2
+    return total ** 0.5
+
+
+def save_class_weight_plot(class_weights):
+    values = class_weights.detach().cpu().numpy()
+
+    plt.figure(figsize=(9, 5))
+    plt.bar(CLASS_NAMES, values)
+    plt.title("Automatic Class Weights")
+    plt.xlabel("Class")
+    plt.ylabel("Weight")
+    plt.xticks(rotation=25, ha="right")
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "class_weights.png", dpi=160)
+    plt.close()
+
+
+def save_training_plots(history):
+    if not history["epoch"]:
+        return
+
+    epochs = history["epoch"]
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["train_loss"], marker="o", label="Train Loss")
+    plt.plot(epochs, history["val_loss"], marker="o", label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "loss_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(9, 5))
+    for class_index, class_name in enumerate(CLASS_NAMES):
+        plt.plot(
+            epochs,
+            [row[class_index] * 100 for row in history["ious"]],
+            marker="o",
+            label=class_name,
+        )
+    plt.xlabel("Epoch")
+    plt.ylabel("IoU (%)")
+    plt.title("Per-Class IoU")
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "class_iou_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        epochs,
+        [v * 100 for v in history["miou_all"]],
+        marker="o",
+        label="mIoU All",
+    )
+    plt.plot(
+        epochs,
+        [v * 100 for v in history["miou_vegetation"]],
+        marker="o",
+        label="mIoU Vegetation",
+    )
+    plt.xlabel("Epoch")
+    plt.ylabel("mIoU (%)")
+    plt.title("mIoU Trend")
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "miou_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["learning_rate"], marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate Schedule")
+    plt.yscale("log")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "learning_rate_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["weight_norm"], marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("L2 Norm")
+    plt.title("Model Weight Norm")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "weight_norm_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["grad_norm"], marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Average L2 Norm")
+    plt.title("Gradient Norm")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "gradient_norm_curve.png", dpi=160)
+    plt.close()
+
+
 def build_datasets():
     train_sets = []
     val_sets = []
@@ -410,6 +537,7 @@ def main():
     ).to(DEVICE)
 
     class_weights = compute_class_weights(train_dataset).to(DEVICE)
+    save_class_weight_plot(class_weights)
 
     cross_entropy = torch.nn.CrossEntropyLoss(
         weight=class_weights,
@@ -442,6 +570,9 @@ def main():
         ],
         "miou_all",
         "miou_vegetation",
+        "learning_rate",
+        "weight_norm",
+        "grad_norm",
     ]
 
     with open(
@@ -452,9 +583,23 @@ def main():
     ) as f:
         csv.writer(f).writerow(history_header)
 
+    plot_history = {
+        "epoch": [],
+        "train_loss": [],
+        "val_loss": [],
+        "ious": [],
+        "miou_all": [],
+        "miou_vegetation": [],
+        "learning_rate": [],
+        "weight_norm": [],
+        "grad_norm": [],
+    }
+
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
+        grad_norm_sum = 0.0
+        grad_norm_steps = 0
 
         for images, masks in tqdm(
             train_loader,
@@ -471,6 +616,10 @@ def main():
                 + 0.5 * masked_dice_loss(outputs, masks)
             )
             loss.backward()
+
+            grad_norm_sum += calculate_grad_norm(model)
+            grad_norm_steps += 1
+
             optimizer.step()
             train_loss += loss.item()
 
@@ -539,12 +688,31 @@ def main():
             f"mIoU (vegetation): "
             f"{miou_vegetation * 100:.2f}%"
         )
-        print(
-            "Learning rate:",
-            optimizer.param_groups[0]["lr"],
+        current_lr = optimizer.param_groups[0]["lr"]
+        current_weight_norm = calculate_weight_norm(model)
+        average_grad_norm = (
+            grad_norm_sum / max(grad_norm_steps, 1)
         )
 
+        print("Learning rate:", current_lr)
+        print(f"Weight norm: {current_weight_norm:.4f}")
+        print(f"Gradient norm: {average_grad_norm:.4f}")
+
         save_confusion_matrix(cm, epoch)
+
+        plot_history["epoch"].append(epoch)
+        plot_history["train_loss"].append(train_loss)
+        plot_history["val_loss"].append(val_loss)
+        plot_history["ious"].append(
+            [float(x.item()) for x in ious]
+        )
+        plot_history["miou_all"].append(miou_all)
+        plot_history["miou_vegetation"].append(miou_vegetation)
+        plot_history["learning_rate"].append(current_lr)
+        plot_history["weight_norm"].append(current_weight_norm)
+        plot_history["grad_norm"].append(average_grad_norm)
+
+        save_training_plots(plot_history)
 
         with open(
             history_path,
@@ -559,6 +727,9 @@ def main():
                 *[x.item() for x in ious],
                 miou_all,
                 miou_vegetation,
+                current_lr,
+                current_weight_norm,
+                average_grad_norm,
             ])
 
         if miou_vegetation > best_vegetation_miou + 1e-4:
