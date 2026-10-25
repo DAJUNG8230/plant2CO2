@@ -5,6 +5,11 @@ import random
 import numpy as np
 from PIL import Image
 
+try:
+    import rasterio
+except ImportError:
+    rasterio = None
+
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import torchvision.transforms.functional as TF
@@ -40,6 +45,29 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_image(path):
+    path = Path(path)
+
+    if path.suffix.lower() in {".tif", ".tiff"}:
+        if rasterio is None:
+            raise ImportError(
+                "讀取 FLAIR GeoTIFF 需要 rasterio。"
+                "請執行 python -m pip install -r requirements.txt"
+            )
+
+        with rasterio.open(path) as src:
+            if src.count < 3:
+                raise ValueError(
+                    f"{path} 只有 {src.count} 個 band，至少需要 RGB 3 bands"
+                )
+
+            rgb = src.read([1, 2, 3])
+            rgb = np.transpose(rgb, (1, 2, 0))
+
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        return Image.fromarray(rgb)
+
     return Image.open(path).convert("RGB")
 
 
@@ -86,8 +114,14 @@ class ManifestDataset(Dataset):
 
 
 def load_pair(image_path, mask_path, augment):
-    image = load_image(image_path)
-    mask = Image.open(mask_path)
+    try:
+        image = load_image(image_path)
+        mask = Image.open(mask_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"讀取資料失敗\nImage: {image_path}\nMask: {mask_path}\n"
+            f"原因: {type(exc).__name__}: {exc}"
+        ) from exc
 
     image = TF.resize(
         image,
