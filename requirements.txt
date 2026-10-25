@@ -8,3 +8,5 @@ segmentation-models-pytorch>=0.3.3
 label-studio-converter>=0.0.59
 tqdm>=4.66
 transformers>=4.45
+
+rasterio>=1.3
