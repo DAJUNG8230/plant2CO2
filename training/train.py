@@ -36,10 +36,15 @@ CLASS_NAMES = [
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
 IMAGE_SIZE = 512
-BATCH_SIZE = 2
 EPOCHS = 50
 LEARNING_RATE = 1e-4
 EARLY_STOPPING_PATIENCE = 8
+
+NUM_WORKERS = 4
+PREFETCH_FACTOR = 2
+VALIDATE_EVERY = 2
+GRAD_NORM_EVERY = 100
+USE_AMP = True
 
 USE_FLAIR = True
 USE_LABEL_STUDIO = True
@@ -49,6 +54,23 @@ OUTPUT_DIR = Path("outputs_training")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def choose_batch_size():
+    if DEVICE.type != "cuda":
+        return 2
+
+    total_gb = (
+        torch.cuda.get_device_properties(0).total_memory
+        / (1024 ** 3)
+    )
+
+    if total_gb >= 5.5:
+        return 4
+    return 2
+
+
+BATCH_SIZE = choose_batch_size()
 
 
 def load_image(path):
@@ -513,20 +535,31 @@ def main():
 
     print(f"Train samples: {len(train_dataset):,}")
     print(f"Val samples: {len(val_dataset):,}")
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"DataLoader workers: {NUM_WORKERS}")
+    print(f"AMP: {USE_AMP and DEVICE.type == 'cuda'}")
+    print(f"Validate every: {VALIDATE_EVERY} epoch(s)")
+    print(f"Gradient norm every: {GRAD_NORM_EVERY} batch(es)")
+
+    loader_kwargs = {
+        "num_workers": NUM_WORKERS,
+        "pin_memory": DEVICE.type == "cuda",
+        "persistent_workers": NUM_WORKERS > 0,
+    }
+    if NUM_WORKERS > 0:
+        loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,
-        pin_memory=DEVICE.type == "cuda",
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
-        pin_memory=DEVICE.type == "cuda",
+        **loader_kwargs,
     )
 
     model = smp.DeepLabV3Plus(
@@ -549,6 +582,13 @@ def main():
         lr=LEARNING_RATE,
         weight_decay=1e-4,
     )
+
+    amp_enabled = USE_AMP and DEVICE.type == "cuda"
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+    )
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -601,93 +641,133 @@ def main():
         grad_norm_sum = 0.0
         grad_norm_steps = 0
 
-        for images, masks in tqdm(
-            train_loader,
-            desc=f"Epoch {epoch}/{EPOCHS} Train",
+        for batch_index, (images, masks) in enumerate(
+            tqdm(
+                train_loader,
+                desc=f"Epoch {epoch}/{EPOCHS} Train",
+            ),
+            start=1,
         ):
-            images = images.to(DEVICE)
-            masks = masks.to(DEVICE)
+            images = images.to(DEVICE, non_blocking=True)
+            masks = masks.to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(images)
 
-            loss = (
-                0.5 * cross_entropy(outputs, masks)
-                + 0.5 * masked_dice_loss(outputs, masks)
-            )
-            loss.backward()
-
-            grad_norm_sum += calculate_grad_norm(model)
-            grad_norm_steps += 1
-
-            optimizer.step()
-            train_loss += loss.item()
-
-        train_loss /= max(len(train_loader), 1)
-
-        model.eval()
-        val_loss = 0.0
-        cm = torch.zeros(
-            (NUM_CLASSES, NUM_CLASSES),
-            dtype=torch.int64,
-            device=DEVICE,
-        )
-
-        with torch.no_grad():
-            for images, masks in val_loader:
-                images = images.to(DEVICE)
-                masks = masks.to(DEVICE)
+            with torch.amp.autocast(
+                "cuda",
+                enabled=amp_enabled,
+            ):
                 outputs = model(images)
-
                 loss = (
                     0.5 * cross_entropy(outputs, masks)
                     + 0.5 * masked_dice_loss(outputs, masks)
                 )
-                val_loss += loss.item()
 
-                predictions = torch.argmax(outputs, dim=1)
-                valid = (
-                    (masks >= 0)
-                    & (masks < NUM_CLASSES)
-                    & (masks != IGNORE_INDEX)
-                )
+            scaler.scale(loss).backward()
 
-                indexes = (
-                    NUM_CLASSES * masks[valid]
-                    + predictions[valid]
-                )
-                cm += torch.bincount(
-                    indexes,
-                    minlength=NUM_CLASSES * NUM_CLASSES,
-                ).reshape(NUM_CLASSES, NUM_CLASSES)
+            should_measure_grad = (
+                batch_index % GRAD_NORM_EVERY == 0
+            )
 
-        val_loss /= max(len(val_loader), 1)
-        scheduler.step(val_loss)
+            if should_measure_grad:
+                scaler.unscale_(optimizer)
+                grad_norm_sum += calculate_grad_norm(model)
+                grad_norm_steps += 1
 
-        ious = calculate_iou(cm)
-        miou_all = safe_mean(ious)
-        miou_vegetation = safe_mean(
-            ious[VEGETATION_CLASS_IDS]
+            scaler.step(optimizer)
+            scaler.update()
+            train_loss += loss.item()
+
+        train_loss /= max(len(train_loader), 1)
+
+        should_validate = (
+            epoch % VALIDATE_EVERY == 0
+            or epoch == 1
+            or epoch == EPOCHS
         )
+
+        val_loss = float("nan")
+        ious = torch.full((NUM_CLASSES,), float("nan"))
+        miou_all = float("nan")
+        miou_vegetation = float("nan")
+        cm = None
+
+        if should_validate:
+            model.eval()
+            val_loss = 0.0
+            cm = torch.zeros(
+                (NUM_CLASSES, NUM_CLASSES),
+                dtype=torch.int64,
+                device=DEVICE,
+            )
+
+            with torch.no_grad():
+                for images, masks in tqdm(
+                    val_loader,
+                    desc=f"Epoch {epoch}/{EPOCHS} Val",
+                ):
+                    images = images.to(DEVICE, non_blocking=True)
+                    masks = masks.to(DEVICE, non_blocking=True)
+
+                    with torch.amp.autocast(
+                        "cuda",
+                        enabled=amp_enabled,
+                    ):
+                        outputs = model(images)
+                        loss = (
+                            0.5 * cross_entropy(outputs, masks)
+                            + 0.5 * masked_dice_loss(outputs, masks)
+                        )
+
+                    val_loss += loss.item()
+
+                    predictions = torch.argmax(outputs, dim=1)
+                    valid = (
+                        (masks >= 0)
+                        & (masks < NUM_CLASSES)
+                        & (masks != IGNORE_INDEX)
+                    )
+
+                    indexes = (
+                        NUM_CLASSES * masks[valid]
+                        + predictions[valid]
+                    )
+                    cm += torch.bincount(
+                        indexes,
+                        minlength=NUM_CLASSES * NUM_CLASSES,
+                    ).reshape(NUM_CLASSES, NUM_CLASSES)
+
+            val_loss /= max(len(val_loader), 1)
+            scheduler.step(val_loss)
+
+            ious = calculate_iou(cm)
+            miou_all = safe_mean(ious)
+            miou_vegetation = safe_mean(
+                ious[VEGETATION_CLASS_IDS]
+            )
 
         print(f"\nEpoch {epoch}")
         print(f"Train Loss: {train_loss:.4f}")
-        print(f"Val Loss: {val_loss:.4f}")
 
-        for i, name in enumerate(CLASS_NAMES):
+        if should_validate:
+            print(f"Val Loss: {val_loss:.4f}")
+
+            for i, name in enumerate(CLASS_NAMES):
+                print(
+                    f"{name:<16}: "
+                    f"{ious[i].item() * 100:.2f}%"
+                )
+
             print(
-                f"{name:<16}: "
-                f"{ious[i].item() * 100:.2f}%"
+                f"mIoU (all 6 classes): "
+                f"{miou_all * 100:.2f}%"
             )
-
-        print(
-            f"mIoU (all 6 classes): "
-            f"{miou_all * 100:.2f}%"
-        )
-        print(
-            f"mIoU (vegetation): "
-            f"{miou_vegetation * 100:.2f}%"
-        )
+            print(
+                f"mIoU (vegetation): "
+                f"{miou_vegetation * 100:.2f}%"
+            )
+        else:
+            print("Validation: skipped this epoch")
         current_lr = optimizer.param_groups[0]["lr"]
         current_weight_norm = calculate_weight_norm(model)
         average_grad_norm = (
@@ -698,7 +778,8 @@ def main():
         print(f"Weight norm: {current_weight_norm:.4f}")
         print(f"Gradient norm: {average_grad_norm:.4f}")
 
-        save_confusion_matrix(cm, epoch)
+        if should_validate:
+            save_confusion_matrix(cm, epoch)
 
         plot_history["epoch"].append(epoch)
         plot_history["train_loss"].append(train_loss)
@@ -732,38 +813,41 @@ def main():
                 average_grad_norm,
             ])
 
-        if miou_vegetation > best_vegetation_miou + 1e-4:
-            best_vegetation_miou = miou_vegetation
-            epochs_without_improvement = 0
+        if should_validate:
+            if miou_vegetation > best_vegetation_miou + 1e-4:
+                best_vegetation_miou = miou_vegetation
+                epochs_without_improvement = 0
 
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "encoder": "resnet50",
-                    "num_classes": NUM_CLASSES,
-                    "class_names": CLASS_NAMES,
-                    "vegetation_class_ids": VEGETATION_CLASS_IDS,
-                    "image_size": IMAGE_SIZE,
-                    "best_miou": best_vegetation_miou,
-                },
-                OUTPUT_DIR / "best_model.pth",
-            )
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "encoder": "resnet50",
+                        "num_classes": NUM_CLASSES,
+                        "class_names": CLASS_NAMES,
+                        "vegetation_class_ids": VEGETATION_CLASS_IDS,
+                        "image_size": IMAGE_SIZE,
+                        "batch_size": BATCH_SIZE,
+                        "amp": amp_enabled,
+                        "best_miou": best_vegetation_miou,
+                    },
+                    OUTPUT_DIR / "best_model.pth",
+                )
 
-            print("Saved best model.")
-        else:
-            epochs_without_improvement += 1
-            print(
-                "No vegetation mIoU improvement: "
-                f"{epochs_without_improvement}/"
-                f"{EARLY_STOPPING_PATIENCE}"
-            )
+                print("Saved best model.")
+            else:
+                epochs_without_improvement += 1
+                print(
+                    "No vegetation mIoU improvement: "
+                    f"{epochs_without_improvement}/"
+                    f"{EARLY_STOPPING_PATIENCE}"
+                )
 
-        if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-            print(
-                "\nEarly stopping: vegetation mIoU "
-                "has not improved."
-            )
-            break
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(
+                    "\nEarly stopping: vegetation mIoU "
+                    "has not improved."
+                )
+                break
 
     print("\nTraining finished.")
     print(
