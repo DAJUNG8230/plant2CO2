@@ -439,6 +439,9 @@ def analyze_image(
         "vegetation_pct": round(vegetation_pct, 4),
         "vegetation_area_m2": round(vegetation_area_m2, 4),
         "carbon_sink_kg_co2e": round(carbon_sink, 4),
+        "carbon_sink_kg_co2e_per_year": round(carbon_sink, 4),
+        "carbon_method": "area_times_annual_coefficient",
+        "carbon_formula": "vegetation_area_m2 × carbon_coefficient_kg_co2e_m2_year",
         "mask_filename": mask_filename,
         "overlay_filename": overlay_filename,
     }
