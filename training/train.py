@@ -47,7 +47,7 @@ GRAD_NORM_EVERY = 100
 USE_AMP = True
 
 USE_FLAIR = True
-USE_LABEL_STUDIO = True
+USE_LABEL_STUDIO = False
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_DIR = Path("outputs_training")
@@ -533,6 +533,7 @@ def main():
 
     train_dataset, val_dataset = build_datasets()
 
+    print("Dataset source: FLAIR only")
     print(f"Train samples: {len(train_dataset):,}")
     print(f"Val samples: {len(val_dataset):,}")
     print(f"Batch size: {BATCH_SIZE}")
