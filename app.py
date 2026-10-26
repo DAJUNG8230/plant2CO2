@@ -57,7 +57,7 @@ def analyze():
 
     try:
         gsd_cm = float(request.form.get("gsd", "5.0"))
-        carbon_coefficient = float(request.form.get("carbon_coefficient", "0.35"))
+        carbon_coefficient = float(request.form.get("carbon_coefficient", "0.40"))
     except ValueError:
         return jsonify(success=False, message="GSD 或碳匯係數格式錯誤"), 400
 
