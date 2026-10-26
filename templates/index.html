@@ -14,7 +14,7 @@
 .preview{min-height:430px;background:#eef3ef;border-radius:15px;display:grid;place-items:center;overflow:hidden}.preview img{max-width:100%;max-height:430px}.tabs{display:flex;gap:7px;margin-bottom:12px}.tab{border:0;padding:8px 11px;border-radius:9px;background:#edf3ef;cursor:pointer}.tab.active{background:var(--g);color:#fff}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;margin-top:20px}.kpi{padding:18px}.kpi span{font-size:12px;color:var(--m)}.kpi strong{display:block;font-size:27px;margin-top:7px}
 .result{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}.bar{margin:17px 0}.barhead{display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px}.track{height:10px;background:#edf2ef;border-radius:999px;overflow:hidden}.fill{height:100%;width:0;transition:.5s}.grass{background:#178f59}.barren{background:#9a6740}.background{background:#475569}
-.status{font-size:13px;color:var(--gd);font-weight:800}.hidden{display:none}.progress{height:9px;background:#e5ede8;border-radius:999px;overflow:hidden;margin-top:14px}.progress div{height:100%;width:0;background:var(--g);transition:.3s}.footer{text-align:center;color:var(--m);font-size:12px;padding:24px}
+.status{font-size:13px;color:var(--gd);font-weight:800}.hidden{display:none}.progress{height:9px;background:#e5ede8;border-radius:999px;overflow:hidden;margin-top:14px}.progress div{height:100%;width:0;background:var(--g);transition:.3s}.footer{text-align:center;color:var(--m);font-size:12px;padding:24px}.method{margin-top:20px}.method-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.formula{background:#f7faf8;border:1px solid var(--line);border-radius:14px;padding:16px}.formula code{display:block;background:#eef5f0;border-radius:10px;padding:10px;margin:8px 0;white-space:normal}.sources a{color:var(--gd);font-weight:700;text-decoration:none}.sources a:hover{text-decoration:underline}.notice{background:#fff8e8;border:1px solid #f1d79a;border-radius:12px;padding:12px;font-size:13px;color:#6a5220;margin-top:12px}
 @media(max-width:850px){.grid,.result{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}@media(max-width:560px){.fields,.kpis{grid-template-columns:1fr}.wrap{padding:12px}}
 </style>
 </head>
@@ -33,7 +33,8 @@
     <div class="fields">
       <div class="field"><label>模型</label><select id="model"><option value="deeplabv3plus">DeepLabV3+ · ResNet50</option><option value="unet">U-Net · ResNet34</option><option value="segformer">SegFormer · MiT-B0</option></select></div>
       <div class="field"><label>GSD（cm / pixel）</label><input id="gsd" type="number" min="0.1" step="0.1" value="5.0"></div>
-      <div class="field"><label>碳匯係數（kg CO₂e / m²）</label><input id="coeff" type="number" min="0" step="0.01" value="0.35"></div>
+      <div class="field"><label>碳匯係數情境</label><select id="coeffPreset"><option value="0.40">草生栽培參考中值 · 0.40</option><option value="0.35">耕作田區參考中值 · 0.35</option><option value="0.235">果園草生參考中值 · 0.235</option><option value="custom">自訂係數</option></select></div>
+      <div class="field"><label>碳匯係數（kg CO₂e / m² / 年）</label><input id="coeff" type="number" min="0" step="0.001" value="0.40"></div>
       <div class="field"><label>狀態</label><input id="mode" value="等待分析" disabled></div>
     </div>
     <div class="actions"><button class="btn primary" id="analyze" disabled>開始 AI 分析</button><button class="btn secondary" id="reset">清除</button></div>
@@ -50,7 +51,7 @@
 <section class="kpis">
   <div class="card kpi"><span>植被覆蓋率</span><strong id="vegRate">—</strong></div>
   <div class="card kpi"><span>植被面積</span><strong id="vegArea">—</strong></div>
-  <div class="card kpi"><span>預估碳匯</span><strong id="carbon">—</strong></div>
+  <div class="card kpi"><span>預估年碳匯</span><strong id="carbon">—</strong></div>
   <div class="card kpi"><span>推論時間</span><strong id="time">—</strong></div>
 </section>
 
@@ -69,6 +70,34 @@
   </div>
 </section>
 
+<section class="card method">
+  <h3>碳匯估算方法與資料來源</h3>
+  <div class="method-grid">
+    <div class="formula">
+      <b>1. 植被面積</b>
+      <code>植被面積 (m²) = 植被像素數 × (GSD_cm / 100)²</code>
+      <span class="muted">植被像素為 Herbaceous、Shrub、Trees、Cultivated 四類加總。</span>
+    </div>
+    <div class="formula">
+      <b>2. 年碳匯估算</b>
+      <code>年碳匯 (kg CO₂e/年) = 植被面積 (m²) × 碳匯係數 (kg CO₂e/m²/年)</code>
+      <span class="muted">1 Mg CO₂e/ha/年 = 0.1 kg CO₂e/m²/年。</span>
+    </div>
+    <div class="formula">
+      <b>3. 係數參考</b>
+      <div class="muted">農業部資料指出：草生栽培約 1–7 Mg CO₂e/ha/年（0.1–0.7 kg/m²/年）；水稻、雜糧等耕作田區約 3–4 Mg CO₂e/ha/年（0.3–0.4 kg/m²/年）；另有果園草生研究約 1.1–3.6 Mg CO₂e/ha/年。</div>
+    </div>
+    <div class="formula sources">
+      <b>4. 官方來源</b>
+      <p><a href="https://kmweb.moa.gov.tw/knowledgebase.php?func=&id=427194&keyword=&type=12717" target="_blank" rel="noopener">農業部｜土壤碳匯效益</a></p>
+      <p><a href="https://kmweb.moa.gov.tw/knowledgebase.php?func=&id=420283&keyword=&type=13296" target="_blank" rel="noopener">農業部｜農地土壤碳匯管理方法與效益</a></p>
+      <p><a href="https://enews.moenv.gov.tw/moenv-news/zh-tw/News/2502" target="_blank" rel="noopener">環境部｜改進農業土壤管理方法學</a></p>
+      <p><a href="https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/4_Volume4/V4_06_Ch6_Grassland.pdf" target="_blank" rel="noopener">IPCC 2006 Guidelines｜Grassland</a></p>
+    </div>
+  </div>
+  <div class="notice">目前網站採「面積 × 年碳匯係數」做研究型估算；係數會受植被類型、土壤、氣候與管理方式影響，不能直接視為碳權查驗結果。若取得實測土壤有機碳變化，可再依 IPCC / 環境部方法學改用碳庫變化法，並以 44/12 將 C 轉換為 CO₂e。</div>
+</section>
+
 <div class="footer">plant2CO2 · Flask + PyTorch semantic segmentation dashboard</div>
 </div>
 
@@ -83,6 +112,9 @@ function load(f){currentFile=f;urls.original=URL.createObjectURL(f);preview.src=
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>show(b.dataset.view));
 function show(v){currentView=v;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));if(urls[v])preview.src=urls[v]}
 function pct(n){return Number(n).toFixed(1)+'%'}function num(n){return Number(n).toLocaleString('zh-TW',{maximumFractionDigits:2})}
+const coeffPreset=document.getElementById('coeffPreset'),coeffInput=document.getElementById('coeff');
+coeffPreset.onchange=()=>{if(coeffPreset.value!=='custom'){coeffInput.value=coeffPreset.value;coeffInput.readOnly=true}else{coeffInput.readOnly=false;coeffInput.focus()}};
+coeffInput.readOnly=true;
 analyze.onclick=async()=>{
   if(!currentFile)return;
   analyze.disabled=true;
@@ -93,7 +125,7 @@ analyze.onclick=async()=>{
     urls.mask=d.mask_url+'?t='+Date.now();urls.overlay=d.overlay_url+'?t='+Date.now();
     document.getElementById('vegRate').textContent=pct(d.vegetation_pct);
     document.getElementById('vegArea').textContent=num(d.vegetation_area_m2)+' m²';
-    document.getElementById('carbon').textContent=num(d.carbon_sink_kg_co2e)+' kg';
+    document.getElementById('carbon').textContent=num(d.carbon_sink_kg_co2e_per_year ?? d.carbon_sink_kg_co2e)+' kg CO₂e/年';
     document.getElementById('time').textContent=Number(d.inference_time).toFixed(2)+' s';
     document.getElementById('mode').value=d.mode==='model'?'正式模型':'展示推論';
     document.getElementById('modelName').textContent=d.model||'—';
