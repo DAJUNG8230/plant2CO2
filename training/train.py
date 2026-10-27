@@ -15,7 +15,12 @@ except ImportError:
     rasterio = None
 
 import torch
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import (
+    Dataset,
+    DataLoader,
+    ConcatDataset,
+    WeightedRandomSampler,
+)
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 
@@ -47,7 +52,11 @@ GRAD_NORM_EVERY = 100
 USE_AMP = True
 
 USE_FLAIR = True
-USE_LABEL_STUDIO = False
+USE_LABEL_STUDIO = True
+
+# 每個 training epoch 預期抽樣比例。
+# 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
+LABEL_STUDIO_TRAIN_SHARE = 0.35
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_DIR = Path("outputs_training")
@@ -461,6 +470,9 @@ def build_datasets():
     train_sets = []
     val_sets = []
 
+    flair_train_dataset = None
+    label_studio_train_dataset = None
+
     if USE_FLAIR:
         flair_train = Path("flair_manifests/train.csv")
         flair_val = Path("flair_manifests/val.csv")
@@ -471,9 +483,11 @@ def build_datasets():
                 "python training\\prepare_flair_6class.py"
             )
 
-        train_sets.append(
-            ManifestDataset(flair_train, augment=True)
+        flair_train_dataset = ManifestDataset(
+            flair_train,
+            augment=True,
         )
+        train_sets.append(flair_train_dataset)
         val_sets.append(
             ManifestDataset(flair_val, augment=False)
         )
@@ -488,25 +502,25 @@ def build_datasets():
             custom_train_images.exists()
             and custom_train_masks.exists()
         ):
-            train_sets.append(
-                SegmentationDataset(
-                    custom_train_images,
-                    custom_train_masks,
-                    augment=True,
-                )
+            label_studio_train_dataset = SegmentationDataset(
+                custom_train_images,
+                custom_train_masks,
+                augment=True,
             )
+            if len(label_studio_train_dataset) > 0:
+                train_sets.append(label_studio_train_dataset)
 
         if (
             custom_val_images.exists()
             and custom_val_masks.exists()
         ):
-            val_sets.append(
-                SegmentationDataset(
-                    custom_val_images,
-                    custom_val_masks,
-                    augment=False,
-                )
+            custom_val_dataset = SegmentationDataset(
+                custom_val_images,
+                custom_val_masks,
+                augment=False,
             )
+            if len(custom_val_dataset) > 0:
+                val_sets.append(custom_val_dataset)
 
     if not train_sets or not val_sets:
         raise RuntimeError("沒有可用的 train/val dataset")
@@ -522,7 +536,50 @@ def build_datasets():
         else ConcatDataset(val_sets)
     )
 
-    return train_dataset, val_dataset
+    train_sampler = None
+
+    if (
+        flair_train_dataset is not None
+        and label_studio_train_dataset is not None
+        and len(flair_train_dataset) > 0
+        and len(label_studio_train_dataset) > 0
+    ):
+        flair_share = 1.0 - LABEL_STUDIO_TRAIN_SHARE
+
+        flair_weight = (
+            flair_share / len(flair_train_dataset)
+        )
+        label_studio_weight = (
+            LABEL_STUDIO_TRAIN_SHARE
+            / len(label_studio_train_dataset)
+        )
+
+        sample_weights = (
+            [flair_weight] * len(flair_train_dataset)
+            + [label_studio_weight]
+            * len(label_studio_train_dataset)
+        )
+
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_dataset),
+            replacement=True,
+        )
+
+        print(
+            "Training sampling target: "
+            f"FLAIR {flair_share * 100:.0f}% / "
+            f"Label Studio "
+            f"{LABEL_STUDIO_TRAIN_SHARE * 100:.0f}%"
+        )
+        print(
+            "Source samples: "
+            f"FLAIR={len(flair_train_dataset):,}, "
+            f"Label Studio="
+            f"{len(label_studio_train_dataset):,}"
+        )
+
+    return train_dataset, val_dataset, train_sampler
 
 
 def main():
@@ -531,9 +588,9 @@ def main():
     for i, name in enumerate(CLASS_NAMES):
         print(f"  {i}: {name}")
 
-    train_dataset, val_dataset = build_datasets()
+    train_dataset, val_dataset, train_sampler = build_datasets()
 
-    print("Dataset source: FLAIR only")
+    print("Dataset source: FLAIR + Label Studio")
     print(f"Train samples: {len(train_dataset):,}")
     print(f"Val samples: {len(val_dataset):,}")
     print(f"Batch size: {BATCH_SIZE}")
@@ -553,7 +610,8 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         **loader_kwargs,
     )
     val_loader = DataLoader(
