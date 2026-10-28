@@ -848,8 +848,15 @@ def main():
                     ):
                         outputs = model(images)
                         loss = (
-                            0.5 * cross_entropy(outputs, masks)
-                            + 0.5 * masked_dice_loss(outputs, masks)
+                            0.4 * cross_entropy(outputs, masks)
+                            + 0.4 * masked_tversky_loss(
+                                outputs,
+                                masks,
+                            )
+                            + 0.2 * boundary_loss(
+                                outputs,
+                                masks,
+                            )
                         )
 
                     val_loss += loss.item()
