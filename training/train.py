@@ -43,7 +43,7 @@ VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 IMAGE_SIZE = 512
 EPOCHS = 50
 LEARNING_RATE = 1e-4
-EARLY_STOPPING_PATIENCE = 8
+EARLY_STOPPING_PATIENCE = 10
 
 NUM_WORKERS = 4
 PREFETCH_FACTOR = 2
@@ -56,7 +56,7 @@ USE_LABEL_STUDIO = True
 
 # 每個 training epoch 預期抽樣比例。
 # 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
-LABEL_STUDIO_TRAIN_SHARE = 0.35
+LABEL_STUDIO_TRAIN_SHARE = 0.20
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_DIR = Path("outputs_training")
@@ -200,20 +200,20 @@ def load_pair(image_path, mask_path, augment):
         image = torch.rot90(image, k, dims=[1, 2])
         mask = torch.rot90(mask, k, dims=[0, 1])
 
-        if random.random() < 0.8:
+        if random.random() < 0.4:
             image = TF.adjust_brightness(
                 image,
-                random.uniform(0.85, 1.15),
+                random.uniform(0.90, 1.10),
             )
-        if random.random() < 0.8:
+        if random.random() < 0.4:
             image = TF.adjust_contrast(
                 image,
-                random.uniform(0.85, 1.15),
+                random.uniform(0.90, 1.10),
             )
-        if random.random() < 0.6:
+        if random.random() < 0.3:
             image = TF.adjust_saturation(
                 image,
-                random.uniform(0.85, 1.15),
+                random.uniform(0.90, 1.10),
             )
 
     image = TF.normalize(
@@ -224,7 +224,12 @@ def load_pair(image_path, mask_path, augment):
     return image, mask
 
 
-def masked_dice_loss(logits, targets):
+def masked_tversky_loss(
+    logits,
+    targets,
+    alpha=0.7,
+    beta=0.3,
+):
     probs = torch.softmax(logits, dim=1)
     valid = targets != IGNORE_INDEX
 
@@ -241,13 +246,65 @@ def masked_dice_loss(logits, targets):
     one_hot = one_hot * valid_mask
 
     dims = (0, 2, 3)
-    intersection = (probs * one_hot).sum(dims)
-    denominator = probs.sum(dims) + one_hot.sum(dims)
+    tp = (probs * one_hot).sum(dims)
+    fp = (probs * (1.0 - one_hot)).sum(dims)
+    fn = ((1.0 - probs) * one_hot).sum(dims)
 
-    dice = (2.0 * intersection + 1e-6) / (
-        denominator + 1e-6
+    score = (tp + 1e-6) / (
+        tp + alpha * fp + beta * fn + 1e-6
     )
-    return 1.0 - dice.mean()
+
+    class_weights = torch.tensor(
+        [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+        device=logits.device,
+        dtype=score.dtype,
+    )
+    class_weights = class_weights / class_weights.sum()
+
+    return 1.0 - (score * class_weights).sum()
+
+
+def boundary_loss(logits, targets):
+    probs = torch.softmax(logits, dim=1)
+    valid = targets != IGNORE_INDEX
+
+    safe_targets = targets.clone()
+    safe_targets[~valid] = 0
+
+    one_hot = torch.nn.functional.one_hot(
+        safe_targets,
+        NUM_CLASSES,
+    ).permute(0, 3, 1, 2).float()
+
+    valid_mask = valid.unsqueeze(1).float()
+    probs = probs * valid_mask
+    one_hot = one_hot * valid_mask
+
+    pred_dx = torch.abs(
+        probs[:, :, :, 1:] - probs[:, :, :, :-1]
+    )
+    pred_dy = torch.abs(
+        probs[:, :, 1:, :] - probs[:, :, :-1, :]
+    )
+    true_dx = torch.abs(
+        one_hot[:, :, :, 1:] - one_hot[:, :, :, :-1]
+    )
+    true_dy = torch.abs(
+        one_hot[:, :, 1:, :] - one_hot[:, :, :-1, :]
+    )
+
+    valid_dx = valid_mask[:, :, :, 1:] * valid_mask[:, :, :, :-1]
+    valid_dy = valid_mask[:, :, 1:, :] * valid_mask[:, :, :-1, :]
+
+    loss_x = (
+        torch.abs(pred_dx - true_dx) * valid_dx
+    ).sum() / valid_dx.sum().clamp_min(1.0)
+
+    loss_y = (
+        torch.abs(pred_dy - true_dy) * valid_dy
+    ).sum() / valid_dy.sum().clamp_min(1.0)
+
+    return 0.5 * (loss_x + loss_y)
 
 
 def calculate_iou(confusion_matrix):
@@ -628,7 +685,17 @@ def main():
         classes=NUM_CLASSES,
     ).to(DEVICE)
 
-    class_weights = compute_class_weights(train_dataset).to(DEVICE)
+    class_weights = torch.tensor(
+        [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    print("\nManual class weights:")
+    for i, name in enumerate(CLASS_NAMES):
+        print(
+            f"  {i} {name:<16} "
+            f"weight={class_weights[i].item():.2f}"
+        )
     save_class_weight_plot(class_weights)
 
     cross_entropy = torch.nn.CrossEntropyLoss(
@@ -718,8 +785,15 @@ def main():
             ):
                 outputs = model(images)
                 loss = (
-                    0.5 * cross_entropy(outputs, masks)
-                    + 0.5 * masked_dice_loss(outputs, masks)
+                    0.4 * cross_entropy(outputs, masks)
+                    + 0.4 * masked_tversky_loss(
+                        outputs,
+                        masks,
+                    )
+                    + 0.2 * boundary_loss(
+                        outputs,
+                        masks,
+                    )
                 )
 
             scaler.scale(loss).backward()
@@ -887,6 +961,9 @@ def main():
                         "image_size": IMAGE_SIZE,
                         "batch_size": BATCH_SIZE,
                         "amp": amp_enabled,
+                        "loss": "0.4 CE + 0.4 Tversky + 0.2 Boundary",
+                        "class_weights": [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+                        "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "best_miou": best_vegetation_miou,
                     },
                     OUTPUT_DIR / "best_model.pth",
