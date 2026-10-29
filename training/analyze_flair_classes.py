@@ -64,7 +64,7 @@ TARGET_6CLASS = {
     14: "Other Non-Veg",
     15: "Ignore",
     16: "Trees",
-    17: "Shrub",
+    17: "Trees",
     18: "Other Non-Veg",
     19: "Ignore",
 }
