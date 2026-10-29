@@ -42,21 +42,23 @@ VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
 IMAGE_SIZE = 512
 EPOCHS = 50
-LEARNING_RATE = 1e-4
-EARLY_STOPPING_PATIENCE = 10
+LEARNING_RATE = 3e-5
+EARLY_STOPPING_PATIENCE = 12
 
 NUM_WORKERS = 4
 PREFETCH_FACTOR = 2
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
+RESUME_FROM_BEST = True
+TARGET_VEGETATION_MIOU = 0.80
 
 USE_FLAIR = True
 USE_LABEL_STUDIO = True
 
 # 每個 training epoch 預期抽樣比例。
 # 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
-LABEL_STUDIO_TRAIN_SHARE = 0.20
+LABEL_STUDIO_TRAIN_SHARE = 0.15
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_DIR = Path("outputs_training")
@@ -224,12 +226,7 @@ def load_pair(image_path, mask_path, augment):
     return image, mask
 
 
-def masked_tversky_loss(
-    logits,
-    targets,
-    alpha=0.7,
-    beta=0.3,
-):
+def masked_dice_loss(logits, targets):
     probs = torch.softmax(logits, dim=1)
     valid = targets != IGNORE_INDEX
 
@@ -246,66 +243,21 @@ def masked_tversky_loss(
     one_hot = one_hot * valid_mask
 
     dims = (0, 2, 3)
-    tp = (probs * one_hot).sum(dims)
-    fp = (probs * (1.0 - one_hot)).sum(dims)
-    fn = ((1.0 - probs) * one_hot).sum(dims)
+    intersection = (probs * one_hot).sum(dims)
+    denominator = probs.sum(dims) + one_hot.sum(dims)
 
-    score = (tp + 1e-6) / (
-        tp + alpha * fp + beta * fn + 1e-6
+    dice = (2.0 * intersection + 1e-6) / (
+        denominator + 1e-6
     )
 
     class_weights = torch.tensor(
-        [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
         device=logits.device,
-        dtype=score.dtype,
+        dtype=dice.dtype,
     )
     class_weights = class_weights / class_weights.sum()
 
-    return 1.0 - (score * class_weights).sum()
-
-
-def boundary_loss(logits, targets):
-    probs = torch.softmax(logits, dim=1)
-    valid = targets != IGNORE_INDEX
-
-    safe_targets = targets.clone()
-    safe_targets[~valid] = 0
-
-    one_hot = torch.nn.functional.one_hot(
-        safe_targets,
-        NUM_CLASSES,
-    ).permute(0, 3, 1, 2).float()
-
-    valid_mask = valid.unsqueeze(1).float()
-    probs = probs * valid_mask
-    one_hot = one_hot * valid_mask
-
-    pred_dx = torch.abs(
-        probs[:, :, :, 1:] - probs[:, :, :, :-1]
-    )
-    pred_dy = torch.abs(
-        probs[:, :, 1:, :] - probs[:, :, :-1, :]
-    )
-    true_dx = torch.abs(
-        one_hot[:, :, :, 1:] - one_hot[:, :, :, :-1]
-    )
-    true_dy = torch.abs(
-        one_hot[:, :, 1:, :] - one_hot[:, :, :-1, :]
-    )
-
-    valid_dx = valid_mask[:, :, :, 1:] * valid_mask[:, :, :, :-1]
-    valid_dy = valid_mask[:, :, 1:, :] * valid_mask[:, :, :-1, :]
-
-    loss_x = (
-        torch.abs(pred_dx - true_dx) * valid_dx
-    ).sum() / valid_dx.sum().clamp_min(1.0)
-
-    loss_y = (
-        torch.abs(pred_dy - true_dy) * valid_dy
-    ).sum() / valid_dy.sum().clamp_min(1.0)
-
-    return 0.5 * (loss_x + loss_y)
-
+    return 1.0 - (dice * class_weights).sum()
 
 def calculate_iou(confusion_matrix):
     cm = confusion_matrix.float().cpu()
@@ -425,7 +377,7 @@ def save_class_weight_plot(class_weights):
 
     plt.figure(figsize=(9, 5))
     plt.bar(CLASS_NAMES, values)
-    plt.title("Automatic Class Weights")
+    plt.title("Training Class Weights")
     plt.xlabel("Class")
     plt.ylabel("Weight")
     plt.xticks(rotation=25, ha="right")
@@ -685,8 +637,32 @@ def main():
         classes=NUM_CLASSES,
     ).to(DEVICE)
 
+    resume_path = OUTPUT_DIR / "best_model.pth"
+    resumed_miou = -1.0
+
+    if RESUME_FROM_BEST and resume_path.exists():
+        checkpoint = torch.load(
+            resume_path,
+            map_location=DEVICE,
+            weights_only=False,
+        )
+        state_dict = checkpoint.get(
+            "model_state_dict",
+            checkpoint,
+        )
+        model.load_state_dict(state_dict)
+        resumed_miou = float(
+            checkpoint.get("best_miou", -1.0)
+        )
+        print(
+            "\nResumed from:",
+            resume_path,
+            f"(best vegetation mIoU="
+            f"{resumed_miou * 100:.2f}%)",
+        )
+
     class_weights = torch.tensor(
-        [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
         dtype=torch.float32,
         device=DEVICE,
     )
@@ -700,6 +676,12 @@ def main():
 
     cross_entropy = torch.nn.CrossEntropyLoss(
         weight=class_weights,
+        ignore_index=IGNORE_INDEX,
+        label_smoothing=0.02,
+    )
+    lovasz_loss = smp.losses.LovaszLoss(
+        mode="multiclass",
+        per_image=False,
         ignore_index=IGNORE_INDEX,
     )
 
@@ -719,10 +701,10 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=3,
+        patience=2,
     )
 
-    best_vegetation_miou = -1.0
+    best_vegetation_miou = resumed_miou
     epochs_without_improvement = 0
     history_path = OUTPUT_DIR / "history.csv"
 
@@ -785,12 +767,9 @@ def main():
             ):
                 outputs = model(images)
                 loss = (
-                    0.4 * cross_entropy(outputs, masks)
-                    + 0.4 * masked_tversky_loss(
-                        outputs,
-                        masks,
-                    )
-                    + 0.2 * boundary_loss(
+                    0.35 * cross_entropy(outputs, masks)
+                    + 0.45 * lovasz_loss(outputs, masks)
+                    + 0.20 * masked_dice_loss(
                         outputs,
                         masks,
                     )
@@ -848,12 +827,9 @@ def main():
                     ):
                         outputs = model(images)
                         loss = (
-                            0.4 * cross_entropy(outputs, masks)
-                            + 0.4 * masked_tversky_loss(
-                                outputs,
-                                masks,
-                            )
-                            + 0.2 * boundary_loss(
+                            0.35 * cross_entropy(outputs, masks)
+                            + 0.45 * lovasz_loss(outputs, masks)
+                            + 0.20 * masked_dice_loss(
                                 outputs,
                                 masks,
                             )
@@ -968,8 +944,8 @@ def main():
                         "image_size": IMAGE_SIZE,
                         "batch_size": BATCH_SIZE,
                         "amp": amp_enabled,
-                        "loss": "0.4 CE + 0.4 Tversky + 0.2 Boundary",
-                        "class_weights": [1.4, 0.7, 1.4, 1.7, 1.0, 0.8],
+                        "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
+                        "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "best_miou": best_vegetation_miou,
                     },
@@ -977,6 +953,13 @@ def main():
                 )
 
                 print("Saved best model.")
+
+                if best_vegetation_miou >= TARGET_VEGETATION_MIOU:
+                    print(
+                        "\nTarget reached: vegetation mIoU "
+                        f">= {TARGET_VEGETATION_MIOU * 100:.0f}%"
+                    )
+                    break
             else:
                 epochs_without_improvement += 1
                 print(
