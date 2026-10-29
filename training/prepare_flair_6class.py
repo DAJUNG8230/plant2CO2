@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v2")
 MANIFEST_DIR = Path("flair_manifests")
 
 SEED = 42
@@ -68,7 +68,7 @@ FLAIR_TO_6 = {
     14: 1,  # snow -> Other Non-Veg
     15: 255, # clear cut -> Ignore (ambiguous)
     16: 4,  # mixed -> Trees
-    17: 3,  # ligneous -> Shrub
+    17: 4,  # ligneous -> Trees (visual audit: mostly tree crowns / urban trees)
     18: 1,  # greenhouse -> Other Non-Veg
     19: 255, # other -> Ignore
 }
@@ -130,6 +130,12 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
+    print("Mapping revision: v2")
+    print("  8 brushwood -> Shrub")
+    print(" 16 mixed -> Trees")
+    print(" 17 ligneous -> Trees")
+    print(" 15 clear cut -> Ignore")
+    print(" 19 other -> Ignore")
 
     if len(images) != len(labels):
         print("[WARNING] 影像與標記數量不同，會依檔名實際配對。")
