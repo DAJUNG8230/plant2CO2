@@ -50,7 +50,7 @@ PREFETCH_FACTOR = 2
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
-RESUME_FROM_BEST = True
+RESUME_FROM_BEST = False
 TARGET_VEGETATION_MIOU = 0.80
 
 USE_FLAIR = True
@@ -269,6 +269,33 @@ def calculate_iou(confusion_matrix):
     return iou
 
 
+def calculate_binary_vegetation_metrics(confusion_matrix):
+    cm = confusion_matrix.float().cpu()
+    veg = VEGETATION_CLASS_IDS
+    non_veg = [0, 1]
+
+    tp = cm[veg][:, veg].sum().item()
+    fn = cm[veg][:, non_veg].sum().item()
+    fp = cm[non_veg][:, veg].sum().item()
+    tn = cm[non_veg][:, non_veg].sum().item()
+
+    precision = tp / max(tp + fp, 1.0)
+    recall = tp / max(tp + fn, 1.0)
+    iou = tp / max(tp + fp + fn, 1.0)
+    f1 = 2.0 * precision * recall / max(precision + recall, 1e-12)
+
+    return {
+        "iou": iou,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+    }
+
+
 def safe_mean(values):
     valid = ~torch.isnan(values)
     return values[valid].mean().item() if valid.any() else 0.0
@@ -441,6 +468,28 @@ def save_training_plots(history):
     plt.grid(alpha=0.25)
     plt.tight_layout()
     plt.savefig(PLOT_DIR / "miou_curve.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        epochs,
+        [v * 100 for v in history["binary_vegetation_iou"]],
+        marker="o",
+        label="IoU",
+    )
+    plt.plot(
+        epochs,
+        [v * 100 for v in history["binary_vegetation_f1"]],
+        marker="o",
+        label="F1",
+    )
+    plt.xlabel("Epoch")
+    plt.ylabel("Score (%)")
+    plt.title("Binary Vegetation Metrics")
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / "binary_vegetation_metrics.png", dpi=160)
     plt.close()
 
     plt.figure(figsize=(8, 5))
@@ -718,6 +767,10 @@ def main():
         ],
         "miou_all",
         "miou_vegetation",
+        "binary_vegetation_iou",
+        "binary_vegetation_precision",
+        "binary_vegetation_recall",
+        "binary_vegetation_f1",
         "learning_rate",
         "weight_norm",
         "grad_norm",
@@ -738,6 +791,10 @@ def main():
         "ious": [],
         "miou_all": [],
         "miou_vegetation": [],
+        "binary_vegetation_iou": [],
+        "binary_vegetation_precision": [],
+        "binary_vegetation_recall": [],
+        "binary_vegetation_f1": [],
         "learning_rate": [],
         "weight_norm": [],
         "grad_norm": [],
@@ -802,6 +859,12 @@ def main():
         ious = torch.full((NUM_CLASSES,), float("nan"))
         miou_all = float("nan")
         miou_vegetation = float("nan")
+        binary_metrics = {
+            "iou": float("nan"),
+            "precision": float("nan"),
+            "recall": float("nan"),
+            "f1": float("nan"),
+        }
         cm = None
 
         if should_validate:
@@ -861,6 +924,7 @@ def main():
             miou_vegetation = safe_mean(
                 ious[VEGETATION_CLASS_IDS]
             )
+            binary_metrics = calculate_binary_vegetation_metrics(cm)
 
         print(f"\nEpoch {epoch}")
         print(f"Train Loss: {train_loss:.4f}")
@@ -881,6 +945,22 @@ def main():
             print(
                 f"mIoU (vegetation): "
                 f"{miou_vegetation * 100:.2f}%"
+            )
+            print(
+                "Binary vegetation IoU: "
+                f"{binary_metrics['iou'] * 100:.2f}%"
+            )
+            print(
+                "Binary vegetation Precision: "
+                f"{binary_metrics['precision'] * 100:.2f}%"
+            )
+            print(
+                "Binary vegetation Recall: "
+                f"{binary_metrics['recall'] * 100:.2f}%"
+            )
+            print(
+                "Binary vegetation F1: "
+                f"{binary_metrics['f1'] * 100:.2f}%"
             )
         else:
             print("Validation: skipped this epoch")
@@ -905,6 +985,10 @@ def main():
         )
         plot_history["miou_all"].append(miou_all)
         plot_history["miou_vegetation"].append(miou_vegetation)
+        plot_history["binary_vegetation_iou"].append(binary_metrics["iou"])
+        plot_history["binary_vegetation_precision"].append(binary_metrics["precision"])
+        plot_history["binary_vegetation_recall"].append(binary_metrics["recall"])
+        plot_history["binary_vegetation_f1"].append(binary_metrics["f1"])
         plot_history["learning_rate"].append(current_lr)
         plot_history["weight_norm"].append(current_weight_norm)
         plot_history["grad_norm"].append(average_grad_norm)
@@ -924,6 +1008,10 @@ def main():
                 *[x.item() for x in ious],
                 miou_all,
                 miou_vegetation,
+                binary_metrics["iou"],
+                binary_metrics["precision"],
+                binary_metrics["recall"],
+                binary_metrics["f1"],
                 current_lr,
                 current_weight_norm,
                 average_grad_norm,
@@ -947,7 +1035,10 @@ def main():
                         "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
+                        "flair_mapping_revision": "v3_brushwood_ignore",
                         "best_miou": best_vegetation_miou,
+                        "binary_vegetation_iou": binary_metrics["iou"],
+                        "binary_vegetation_f1": binary_metrics["f1"],
                     },
                     OUTPUT_DIR / "best_model.pth",
                 )
