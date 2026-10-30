@@ -55,7 +55,7 @@ TARGET_6CLASS = {
     5: "Other Non-Veg",
     6: "Trees",
     7: "Trees",
-    8: "Shrub",
+    8: "Ignore",
     9: "Cultivated",
     10: "Herbaceous",
     11: "Cultivated",
