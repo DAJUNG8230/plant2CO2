@@ -45,9 +45,9 @@ EPOCHS = 50
 LEARNING_RATE = 3e-5
 EARLY_STOPPING_PATIENCE = 12
 
-NUM_WORKERS = 0
+NUM_WORKERS = 2
 PREFETCH_FACTOR = 2
-PIN_MEMORY = False
+PIN_MEMORY = True
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
@@ -63,9 +63,13 @@ LABEL_STUDIO_TRAIN_SHARE = 0.15
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Windows + rasterio + large TIFF datasets are more stable with
-# conservative CPU threading and a single DataLoader process.
-torch.set_num_threads(4)
+# Balanced speed/stability settings for Windows + rasterio + RTX 2060.
+torch.set_num_threads(6)
+
+if DEVICE.type == "cuda":
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 OUTPUT_DIR = Path("outputs_training")
 PLOT_DIR = OUTPUT_DIR / "plots"
@@ -73,7 +77,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 
 
 def load_image(path):
