@@ -45,8 +45,9 @@ EPOCHS = 50
 LEARNING_RATE = 3e-5
 EARLY_STOPPING_PATIENCE = 12
 
-NUM_WORKERS = 4
+NUM_WORKERS = 0
 PREFETCH_FACTOR = 2
+PIN_MEMORY = False
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
@@ -61,27 +62,18 @@ USE_LABEL_STUDIO = True
 LABEL_STUDIO_TRAIN_SHARE = 0.15
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Windows + rasterio + large TIFF datasets are more stable with
+# conservative CPU threading and a single DataLoader process.
+torch.set_num_threads(4)
+
 OUTPUT_DIR = Path("outputs_training")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def choose_batch_size():
-    if DEVICE.type != "cuda":
-        return 2
-
-    total_gb = (
-        torch.cuda.get_device_properties(0).total_memory
-        / (1024 ** 3)
-    )
-
-    if total_gb >= 5.5:
-        return 4
-    return 2
-
-
-BATCH_SIZE = choose_batch_size()
+BATCH_SIZE = 2
 
 
 def load_image(path):
@@ -653,16 +645,17 @@ def main():
     print(f"Val samples: {len(val_dataset):,}")
     print(f"Batch size: {BATCH_SIZE}")
     print(f"DataLoader workers: {NUM_WORKERS}")
+    print(f"Pin memory: {PIN_MEMORY and DEVICE.type == 'cuda'}")
     print(f"AMP: {USE_AMP and DEVICE.type == 'cuda'}")
     print(f"Validate every: {VALIDATE_EVERY} epoch(s)")
     print(f"Gradient norm every: {GRAD_NORM_EVERY} batch(es)")
 
     loader_kwargs = {
         "num_workers": NUM_WORKERS,
-        "pin_memory": DEVICE.type == "cuda",
-        "persistent_workers": NUM_WORKERS > 0,
+        "pin_memory": PIN_MEMORY and DEVICE.type == "cuda",
     }
     if NUM_WORKERS > 0:
+        loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
 
     train_loader = DataLoader(
@@ -1017,6 +1010,9 @@ def main():
                 average_grad_norm,
             ])
 
+        if DEVICE.type == "cuda":
+            torch.cuda.empty_cache()
+
         if should_validate:
             if miou_vegetation > best_vegetation_miou + 1e-4:
                 best_vegetation_miou = miou_vegetation
@@ -1031,6 +1027,7 @@ def main():
                         "vegetation_class_ids": VEGETATION_CLASS_IDS,
                         "image_size": IMAGE_SIZE,
                         "batch_size": BATCH_SIZE,
+                        "num_workers": NUM_WORKERS,
                         "amp": amp_enabled,
                         "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
