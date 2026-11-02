@@ -859,11 +859,16 @@ def main():
         grad_norm_sum = 0.0
         grad_norm_steps = 0
 
+        train_progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch:02d}/{EPOCHS} Train",
+            dynamic_ncols=True,
+            leave=True,
+            mininterval=0.5,
+        )
+
         for batch_index, (images, masks) in enumerate(
-            tqdm(
-                train_loader,
-                desc=f"Epoch {epoch}/{EPOCHS} Train",
-            ),
+            train_progress,
             start=1,
         ):
             images = images.to(DEVICE, non_blocking=True)
@@ -910,12 +915,17 @@ def main():
                 )
 
                 if gpu_temp is not None:
-                    print(
-                        f"GPU temp: {gpu_temp}°C",
-                        end="\r",
+                    train_progress.set_postfix(
+                        temp=f"{gpu_temp}C",
+                        refresh=False,
                     )
 
                 if should_stop:
+                    train_progress.set_postfix(
+                        temp=f"{gpu_temp}C",
+                        status="THERMAL STOP",
+                        refresh=True,
+                    )
                     stop_for_temperature = True
                     break
 
@@ -956,7 +966,10 @@ def main():
             with torch.no_grad():
                 for images, masks in tqdm(
                     val_loader,
-                    desc=f"Epoch {epoch}/{EPOCHS} Val",
+                    desc=f"Epoch {epoch:02d}/{EPOCHS} Val",
+                    dynamic_ncols=True,
+                    leave=True,
+                    mininterval=0.5,
                 ):
                     images = images.to(DEVICE, non_blocking=True)
                     masks = masks.to(DEVICE, non_blocking=True)
