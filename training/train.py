@@ -15,6 +15,12 @@ except ImportError:
     rasterio = None
 
 import torch
+
+try:
+    import pynvml
+except ImportError:
+    pynvml = None
+
 from torch.utils.data import (
     Dataset,
     DataLoader,
@@ -45,13 +51,16 @@ EPOCHS = 50
 LEARNING_RATE = 3e-5
 EARLY_STOPPING_PATIENCE = 12
 
-NUM_WORKERS = 2
+NUM_WORKERS = 4
 PREFETCH_FACTOR = 2
 PIN_MEMORY = True
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
 RESUME_FROM_BEST = False
+
+GPU_TEMP_LIMIT_C = 80
+GPU_TEMP_CHECK_EVERY_BATCHES = 50
 TARGET_VEGETATION_MIOU = 0.80
 
 USE_FLAIR = True
@@ -77,7 +86,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-BATCH_SIZE = 4
+BATCH_SIZE = 6
 
 
 def load_image(path):
@@ -520,6 +529,46 @@ def save_training_plots(history):
     plt.close()
 
 
+def get_gpu_temperature_c():
+    if DEVICE.type != "cuda":
+        return None
+
+    if pynvml is None:
+        return None
+
+    try:
+        pynvml.nvmlInit()
+        index = torch.cuda.current_device()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+        temp = pynvml.nvmlDeviceGetTemperature(
+            handle,
+            pynvml.NVML_TEMPERATURE_GPU,
+        )
+        return int(temp)
+    except Exception:
+        return None
+
+
+def check_gpu_temperature_or_stop():
+    temp = get_gpu_temperature_c()
+
+    if temp is None:
+        return False, None
+
+    if temp >= GPU_TEMP_LIMIT_C:
+        print(
+            f"\n[SAFETY STOP] GPU temperature reached "
+            f"{temp}°C (limit {GPU_TEMP_LIMIT_C}°C)."
+        )
+        print(
+            "Training will stop now. "
+            "Previously saved best_model.pth is kept."
+        )
+        return True, temp
+
+    return False, temp
+
+
 def build_datasets():
     train_sets = []
     val_sets = []
@@ -651,6 +700,11 @@ def main():
     print(f"DataLoader workers: {NUM_WORKERS}")
     print(f"Pin memory: {PIN_MEMORY and DEVICE.type == 'cuda'}")
     print(f"AMP: {USE_AMP and DEVICE.type == 'cuda'}")
+    print(f"GPU temp limit: {GPU_TEMP_LIMIT_C} C")
+    print(
+        "GPU temp check every: "
+        f"{GPU_TEMP_CHECK_EVERY_BATCHES} batches"
+    )
     print(f"Validate every: {VALIDATE_EVERY} epoch(s)")
     print(f"Gradient norm every: {GRAD_NORM_EVERY} batch(es)")
 
@@ -797,6 +851,8 @@ def main():
         "grad_norm": [],
     }
 
+    stop_for_temperature = False
+
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
@@ -843,6 +899,30 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
+
+            if (
+                batch_index
+                % GPU_TEMP_CHECK_EVERY_BATCHES
+                == 0
+            ):
+                should_stop, gpu_temp = (
+                    check_gpu_temperature_or_stop()
+                )
+
+                if gpu_temp is not None:
+                    print(
+                        f"GPU temp: {gpu_temp}°C",
+                        end="\r",
+                    )
+
+                if should_stop:
+                    stop_for_temperature = True
+                    break
+
+        if stop_for_temperature:
+            if DEVICE.type == "cuda":
+                torch.cuda.empty_cache()
+            break
 
         train_loss /= max(len(train_loader), 1)
 
@@ -1032,6 +1112,7 @@ def main():
                         "image_size": IMAGE_SIZE,
                         "batch_size": BATCH_SIZE,
                         "num_workers": NUM_WORKERS,
+                        "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
                         "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
@@ -1066,6 +1147,12 @@ def main():
                     "has not improved."
                 )
                 break
+
+    if pynvml is not None:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
 
     print("\nTraining finished.")
     print(
