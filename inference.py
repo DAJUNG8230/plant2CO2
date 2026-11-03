@@ -22,6 +22,8 @@ CLASS_NAMES = [
 NUM_CLASSES = 6
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
+TILE_OVERLAP_RATIO = 0.25
+
 CLASS_COLORS = np.array(
     [
         [154, 103, 64],   # Bare Soil
@@ -280,25 +282,145 @@ def _predict_segformer(rgb):
     return mask.cpu().numpy().astype(np.uint8)
 
 
+def _tile_positions(length, tile_size, stride):
+    if length <= tile_size:
+        return [0]
+
+    positions = list(range(0, length - tile_size + 1, stride))
+    last = length - tile_size
+
+    if positions[-1] != last:
+        positions.append(last)
+
+    return positions
+
+
+def _make_tile_weight(tile_size):
+    window = np.hanning(tile_size).astype(np.float32)
+    window = np.maximum(window, 0.05)
+    weight = np.outer(window, window)
+    return weight.astype(np.float32)
+
+
+def _predict_tiled_smp(rgb, model_name):
+    model = load_model(model_name)
+    tile_size = int(
+        _MODEL_META[model_name].get("image_size", 512)
+    )
+    overlap = max(
+        32,
+        int(tile_size * TILE_OVERLAP_RATIO),
+    )
+    stride = max(1, tile_size - overlap)
+
+    height, width = rgb.shape[:2]
+    padded_h = max(height, tile_size)
+    padded_w = max(width, tile_size)
+
+    padded = np.zeros(
+        (padded_h, padded_w, 3),
+        dtype=np.uint8,
+    )
+    padded[:height, :width] = rgb
+
+    if height < padded_h:
+        padded[height:, :width] = rgb[height - 1:height, :width]
+
+    if width < padded_w:
+        padded[:, width:] = padded[:, width - 1:width]
+
+    y_positions = _tile_positions(
+        padded_h,
+        tile_size,
+        stride,
+    )
+    x_positions = _tile_positions(
+        padded_w,
+        tile_size,
+        stride,
+    )
+
+    logits_sum = np.zeros(
+        (NUM_CLASSES, padded_h, padded_w),
+        dtype=np.float32,
+    )
+    weight_sum = np.zeros(
+        (padded_h, padded_w),
+        dtype=np.float32,
+    )
+    tile_weight = _make_tile_weight(tile_size)
+
+    amp_enabled = DEVICE.type == "cuda"
+
+    with torch.inference_mode():
+        for y in y_positions:
+            for x in x_positions:
+                tile = padded[
+                    y:y + tile_size,
+                    x:x + tile_size,
+                ]
+
+                tensor = _prepare_tensor(
+                    tile,
+                    tile_size,
+                )
+
+                with torch.amp.autocast(
+                    "cuda",
+                    enabled=amp_enabled,
+                ):
+                    logits = model(tensor)
+
+                if logits.shape[-2:] != (
+                    tile_size,
+                    tile_size,
+                ):
+                    logits = F.interpolate(
+                        logits,
+                        size=(tile_size, tile_size),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+
+                tile_logits = (
+                    logits[0]
+                    .float()
+                    .cpu()
+                    .numpy()
+                )
+
+                logits_sum[
+                    :,
+                    y:y + tile_size,
+                    x:x + tile_size,
+                ] += tile_logits * tile_weight[None, :, :]
+
+                weight_sum[
+                    y:y + tile_size,
+                    x:x + tile_size,
+                ] += tile_weight
+
+    logits_sum /= np.maximum(
+        weight_sum[None, :, :],
+        1e-6,
+    )
+
+    mask = np.argmax(
+        logits_sum[:, :height, :width],
+        axis=0,
+    )
+
+    return mask.astype(np.uint8)
+
+
 def predict_with_model(rgb, model_name):
     if model_name == "segformer":
         return _predict_segformer(rgb)
 
-    model = load_model(model_name)
-    image_size = int(_MODEL_META[model_name].get("image_size", 512))
-    x = _prepare_tensor(rgb, image_size)
-
-    with torch.inference_mode():
-        logits = model(x)
-        logits = F.interpolate(
-            logits,
-            size=rgb.shape[:2],
-            mode="bilinear",
-            align_corners=False,
-        )
-        mask = torch.argmax(logits, dim=1)[0]
-
-    return mask.cpu().numpy().astype(np.uint8)
+    return _predict_tiled_smp(
+        rgb,
+        model_name,
+    )
 
 
 def _save_visuals(rgb, mask, output_dir, job_id, model_name):
@@ -363,6 +485,7 @@ def get_runtime_status():
         ),
         "class_names": CLASS_NAMES,
         "vegetation_class_ids": VEGETATION_CLASS_IDS,
+        "tile_overlap_ratio": TILE_OVERLAP_RATIO,
         "models": models,
     }
 
