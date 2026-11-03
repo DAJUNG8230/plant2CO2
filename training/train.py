@@ -264,6 +264,38 @@ def masked_dice_loss(logits, targets):
 
     return 1.0 - (dice * class_weights).sum()
 
+def has_valid_pixels(targets):
+    return bool((targets != IGNORE_INDEX).any().item())
+
+
+def safe_segmentation_loss(
+    outputs,
+    masks,
+    cross_entropy,
+    lovasz_loss,
+):
+    if not has_valid_pixels(masks):
+        return None
+
+    ce = cross_entropy(outputs, masks)
+    lovasz = lovasz_loss(outputs, masks)
+    dice = masked_dice_loss(outputs, masks)
+
+    # Some Lovasz implementations may return an empty tensor when every
+    # valid class is absent after ignore masking. Fall back to CE + Dice.
+    if lovasz.numel() == 0:
+        return (
+            0.60 * ce
+            + 0.40 * dice
+        )
+
+    return (
+        0.35 * ce
+        + 0.45 * lovasz
+        + 0.20 * dice
+    )
+
+
 def calculate_iou(confusion_matrix):
     cm = confusion_matrix.float().cpu()
     intersection = torch.diag(cm)
@@ -856,6 +888,8 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
+        valid_train_batches = 0
+        skipped_train_batches = 0
         grad_norm_sum = 0.0
         grad_norm_steps = 0
 
@@ -881,14 +915,16 @@ def main():
                 enabled=amp_enabled,
             ):
                 outputs = model(images)
-                loss = (
-                    0.35 * cross_entropy(outputs, masks)
-                    + 0.45 * lovasz_loss(outputs, masks)
-                    + 0.20 * masked_dice_loss(
-                        outputs,
-                        masks,
-                    )
+                loss = safe_segmentation_loss(
+                    outputs,
+                    masks,
+                    cross_entropy,
+                    lovasz_loss,
                 )
+
+            if loss is None:
+                skipped_train_batches += 1
+                continue
 
             scaler.scale(loss).backward()
 
@@ -904,6 +940,7 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
+            valid_train_batches += 1
 
             if (
                 batch_index
@@ -934,7 +971,13 @@ def main():
                 torch.cuda.empty_cache()
             break
 
-        train_loss /= max(len(train_loader), 1)
+        train_loss /= max(valid_train_batches, 1)
+
+        if skipped_train_batches > 0:
+            print(
+                f"Skipped all-ignore train batches: "
+                f"{skipped_train_batches}"
+            )
 
         should_validate = (
             epoch % VALIDATE_EVERY == 0
@@ -963,6 +1006,8 @@ def main():
                 device=DEVICE,
             )
 
+            valid_val_batches = 0
+
             with torch.no_grad():
                 for images, masks in tqdm(
                     val_loader,
@@ -979,16 +1024,18 @@ def main():
                         enabled=amp_enabled,
                     ):
                         outputs = model(images)
-                        loss = (
-                            0.35 * cross_entropy(outputs, masks)
-                            + 0.45 * lovasz_loss(outputs, masks)
-                            + 0.20 * masked_dice_loss(
-                                outputs,
-                                masks,
-                            )
+                        loss = safe_segmentation_loss(
+                            outputs,
+                            masks,
+                            cross_entropy,
+                            lovasz_loss,
                         )
 
+                    if loss is None:
+                        continue
+
                     val_loss += loss.item()
+                    valid_val_batches += 1
 
                     predictions = torch.argmax(outputs, dim=1)
                     valid = (
@@ -1006,7 +1053,7 @@ def main():
                         minlength=NUM_CLASSES * NUM_CLASSES,
                     ).reshape(NUM_CLASSES, NUM_CLASSES)
 
-            val_loss /= max(len(val_loader), 1)
+            val_loss /= max(valid_val_batches, 1)
             scheduler.step(val_loss)
 
             ious = calculate_iou(cm)
