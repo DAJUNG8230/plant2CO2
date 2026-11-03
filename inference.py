@@ -50,6 +50,11 @@ MODEL_CONFIG = {
         "default_encoder": "resnet34",
         "paths": [MODELS_DIR / "unet_best.pth"],
     },
+    "pspnet": {
+        "display_name": "PSPNet",
+        "default_encoder": "resnet50",
+        "paths": [MODELS_DIR / "pspnet_resnet50_6class.pth"],
+    },
     "segformer": {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
@@ -101,6 +106,13 @@ def _build_smp_model(model_name, encoder, num_classes):
         )
     if model_name == "unet":
         return smp.Unet(
+            encoder_name=encoder,
+            encoder_weights=None,
+            in_channels=3,
+            classes=num_classes,
+        )
+    if model_name == "pspnet":
+        return smp.PSPNet(
             encoder_name=encoder,
             encoder_weights=None,
             in_channels=3,
