@@ -46,7 +46,7 @@ CLASS_NAMES = [
 ]
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
-IMAGE_SIZE = 512
+IMAGE_SIZE = 768
 EPOCHS = 50
 LEARNING_RATE = 3e-5
 EARLY_STOPPING_PATIENCE = 12
@@ -72,7 +72,7 @@ LABEL_STUDIO_TRAIN_SHARE = 0.15
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Balanced speed/stability settings for Windows + rasterio + RTX 2060.
+# High-detail training settings for Windows + rasterio + RTX 3070 Ti.
 torch.set_num_threads(6)
 
 if DEVICE.type == "cuda":
@@ -86,7 +86,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-BATCH_SIZE = 6
+BATCH_SIZE = 2
 
 
 def load_image(path):
