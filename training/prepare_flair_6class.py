@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v3")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v4")
 MANIFEST_DIR = Path("flair_manifests")
 
 SEED = 42
@@ -63,7 +63,7 @@ FLAIR_TO_6 = {
     9: 5,   # vineyard -> Cultivated
     10: 2,  # herbaceous vegetation -> Herbaceous
     11: 5,  # agricultural land -> Cultivated
-    12: 5,  # plowed land -> Cultivated
+    12: 0,  # plowed land -> Bare Soil (exposed tilled soil is not vegetation)
     13: 1,  # swimming pool -> Other Non-Veg
     14: 1,  # snow -> Other Non-Veg
     15: 255, # clear cut -> Ignore (ambiguous)
@@ -130,8 +130,9 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
-    print("Mapping revision: v3")
+    print("Mapping revision: v4 (plowed land is not live vegetation)")
     print("  8 brushwood -> Ignore")
+    print(" 12 plowed land -> Bare Soil")
     print(" 16 mixed -> Trees")
     print(" 17 ligneous -> Trees")
     print(" 15 clear cut -> Ignore")
