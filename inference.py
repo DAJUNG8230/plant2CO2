@@ -48,7 +48,7 @@ MODEL_CONFIG = {
     },
     "unet": {
         "display_name": "U-Net",
-        "default_encoder": "resnet34",
+        "default_encoder": "resnet50",
         "paths": [MODELS_DIR / "unet_best.pth"],
     },
     "pspnet": {
@@ -195,6 +195,41 @@ def _load_segformer(model_path):
     return model
 
 
+def _infer_resnet_encoder_from_state_dict(state_dict, fallback):
+    keys = set(state_dict.keys())
+
+    # ResNet50/101/152 use Bottleneck blocks and therefore contain conv3.
+    has_bottleneck = any(
+        key.startswith("encoder.layer1.")
+        and ".conv3.weight" in key
+        for key in keys
+    )
+
+    if not has_bottleneck:
+        return "resnet34" if fallback.startswith("resnet") else fallback
+
+    def max_block_index(layer_name):
+        prefix = f"encoder.{layer_name}."
+        indexes = []
+        for key in keys:
+            if key.startswith(prefix):
+                rest = key[len(prefix):]
+                block = rest.split(".", 1)[0]
+                if block.isdigit():
+                    indexes.append(int(block))
+        return max(indexes) if indexes else -1
+
+    layer3_max = max_block_index("layer3")
+
+    # layer3 blocks: ResNet50=6 (0..5), ResNet101=23 (0..22),
+    # ResNet152=36 (0..35).
+    if layer3_max >= 35:
+        return "resnet152"
+    if layer3_max >= 22:
+        return "resnet101"
+    return "resnet50"
+
+
 def load_model(model_name):
     if model_name not in MODEL_CONFIG:
         raise ValueError(f"未知模型：{model_name}")
@@ -219,6 +254,13 @@ def load_model(model_name):
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         state_dict = checkpoint["model_state_dict"]
         encoder = checkpoint.get("encoder", config["default_encoder"])
+
+        if model_name == "unet" and "encoder" not in checkpoint:
+            encoder = _infer_resnet_encoder_from_state_dict(
+                state_dict,
+                encoder,
+            )
+
         num_classes = int(checkpoint.get("num_classes", NUM_CLASSES))
         image_size = int(checkpoint.get("image_size", 512))
         best_miou = checkpoint.get("best_miou")
@@ -226,6 +268,13 @@ def load_model(model_name):
     else:
         state_dict = checkpoint
         encoder = config["default_encoder"]
+
+        if model_name == "unet":
+            encoder = _infer_resnet_encoder_from_state_dict(
+                state_dict,
+                encoder,
+            )
+
         num_classes = NUM_CLASSES
         image_size = 512
         best_miou = None
