@@ -22,7 +22,8 @@ CLASS_NAMES = [
 NUM_CLASSES = 6
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
-TILE_OVERLAP_RATIO = 0.25
+INFERENCE_TILE_SIZE = 512
+TILE_OVERLAP_RATIO = 0.50
 
 CLASS_COLORS = np.array(
     [
@@ -316,9 +317,10 @@ def _make_tile_weight(tile_size):
 
 def _predict_tiled_smp(rgb, model_name):
     model = load_model(model_name)
-    tile_size = int(
-        _MODEL_META[model_name].get("image_size", 512)
-    )
+    # Use a smaller fixed tile at native resolution to preserve tiny
+    # vegetation and soil gaps, even when the checkpoint was trained with
+    # a larger nominal input size.
+    tile_size = INFERENCE_TILE_SIZE
     overlap = max(
         32,
         int(tile_size * TILE_OVERLAP_RATIO),
@@ -497,6 +499,7 @@ def get_runtime_status():
         ),
         "class_names": CLASS_NAMES,
         "vegetation_class_ids": VEGETATION_CLASS_IDS,
+        "inference_tile_size": INFERENCE_TILE_SIZE,
         "tile_overlap_ratio": TILE_OVERLAP_RATIO,
         "models": models,
     }
