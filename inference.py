@@ -304,22 +304,26 @@ def load_model(model_name):
     return model
 
 
-def _prepare_tensor(rgb, image_size):
+def _prepare_tensor(rgb, image_size, normalize=True):
     image = Image.fromarray(rgb).resize(
         (image_size, image_size),
         Image.Resampling.BILINEAR,
     )
     array = np.asarray(image, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
-    mean = torch.tensor(
-        [0.485, 0.456, 0.406],
-        dtype=tensor.dtype,
-    ).view(1, 3, 1, 1)
-    std = torch.tensor(
-        [0.229, 0.224, 0.225],
-        dtype=tensor.dtype,
-    ).view(1, 3, 1, 1)
-    return ((tensor - mean) / std).to(DEVICE)
+
+    if normalize:
+        mean = torch.tensor(
+            [0.485, 0.456, 0.406],
+            dtype=tensor.dtype,
+        ).view(1, 3, 1, 1)
+        std = torch.tensor(
+            [0.229, 0.224, 0.225],
+            dtype=tensor.dtype,
+        ).view(1, 3, 1, 1)
+        tensor = (tensor - mean) / std
+
+    return tensor.to(DEVICE)
 
 
 def _predict_segformer(rgb):
@@ -364,7 +368,7 @@ def _make_tile_weight(tile_size):
     return weight.astype(np.float32)
 
 
-def _predict_tiled_smp(rgb, model_name):
+def _predict_tiled_smp(rgb, model_name, normalize=True):
     model = load_model(model_name)
     # Use a smaller fixed tile at native resolution to preserve tiny
     # vegetation and soil gaps, even when the checkpoint was trained with
@@ -426,6 +430,7 @@ def _predict_tiled_smp(rgb, model_name):
                 tensor = _prepare_tensor(
                     tile,
                     tile_size,
+                    normalize=normalize,
                 )
 
                 with torch.amp.autocast(
@@ -476,13 +481,69 @@ def _predict_tiled_smp(rgb, model_name):
     return mask.astype(np.uint8)
 
 
+def _dominant_class_fraction(mask):
+    counts = np.bincount(
+        mask.reshape(-1),
+        minlength=NUM_CLASSES,
+    )
+    return float(counts.max()) / max(int(mask.size), 1)
+
+
+def _predict_pspnet_with_preprocessing_fallback(rgb):
+    # This PSPNet checkpoint is a raw state_dict and does not store
+    # preprocessing metadata. Try ImageNet normalization first, then
+    # automatically retry raw [0,1] input only if the result collapses
+    # almost entirely into a single class.
+    mask_normalized = _predict_tiled_smp(
+        rgb,
+        "pspnet",
+        normalize=True,
+    )
+    normalized_dominance = _dominant_class_fraction(
+        mask_normalized
+    )
+
+    if normalized_dominance < 0.985:
+        _MODEL_META["pspnet"]["preprocessing"] = "imagenet"
+        _MODEL_META["pspnet"]["dominant_class_fraction"] = (
+            normalized_dominance
+        )
+        return mask_normalized
+
+    mask_raw = _predict_tiled_smp(
+        rgb,
+        "pspnet",
+        normalize=False,
+    )
+    raw_dominance = _dominant_class_fraction(mask_raw)
+
+    if raw_dominance + 0.02 < normalized_dominance:
+        _MODEL_META["pspnet"]["preprocessing"] = "raw_0_1"
+        _MODEL_META["pspnet"]["dominant_class_fraction"] = (
+            raw_dominance
+        )
+        return mask_raw
+
+    _MODEL_META["pspnet"]["preprocessing"] = "imagenet"
+    _MODEL_META["pspnet"]["dominant_class_fraction"] = (
+        normalized_dominance
+    )
+    return mask_normalized
+
+
 def predict_with_model(rgb, model_name):
     if model_name == "segformer":
         return _predict_segformer(rgb)
 
+    if model_name == "pspnet":
+        return _predict_pspnet_with_preprocessing_fallback(
+            rgb
+        )
+
     return _predict_tiled_smp(
         rgb,
         model_name,
+        normalize=True,
     )
 
 
@@ -616,6 +677,7 @@ def analyze_image(
         "device": str(DEVICE),
         "num_classes": NUM_CLASSES,
         "validation_miou": meta.get("best_miou"),
+        "preprocessing": meta.get("preprocessing"),
         "id2label": id2label,
         "class_stats": class_stats,
         "width": image.width,
