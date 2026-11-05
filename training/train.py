@@ -46,7 +46,7 @@ CLASS_NAMES = [
 ]
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
-IMAGE_SIZE = 768
+IMAGE_SIZE = 512
 EPOCHS = 50
 LEARNING_RATE = 3e-5
 EARLY_STOPPING_PATIENCE = 12
@@ -68,11 +68,11 @@ USE_LABEL_STUDIO = True
 
 # 每個 training epoch 預期抽樣比例。
 # 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
-LABEL_STUDIO_TRAIN_SHARE = 0.15
+LABEL_STUDIO_TRAIN_SHARE = 0.30
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# High-detail training settings for Windows + rasterio + RTX 3070 Ti.
+# Native-detail training settings for Windows + rasterio + RTX 3070 Ti.
 torch.set_num_threads(6)
 
 if DEVICE.type == "cuda":
@@ -86,7 +86,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 
 
 def load_image(path):
@@ -158,6 +158,55 @@ class ManifestDataset(Dataset):
         return load_pair(image_path, mask_path, self.augment)
 
 
+def _pad_to_crop_size(image, mask):
+    width, height = image.size
+    pad_right = max(0, IMAGE_SIZE - width)
+    pad_bottom = max(0, IMAGE_SIZE - height)
+
+    if pad_right > 0 or pad_bottom > 0:
+        image = TF.pad(
+            image,
+            [0, 0, pad_right, pad_bottom],
+            fill=0,
+        )
+        mask = TF.pad(
+            mask,
+            [0, 0, pad_right, pad_bottom],
+            fill=IGNORE_INDEX,
+        )
+
+    return image, mask
+
+
+def _native_crop_pair(image, mask, augment):
+    image, mask = _pad_to_crop_size(image, mask)
+    width, height = image.size
+
+    if augment:
+        top = random.randint(0, height - IMAGE_SIZE)
+        left = random.randint(0, width - IMAGE_SIZE)
+    else:
+        top = max(0, (height - IMAGE_SIZE) // 2)
+        left = max(0, (width - IMAGE_SIZE) // 2)
+
+    image = TF.crop(
+        image,
+        top,
+        left,
+        IMAGE_SIZE,
+        IMAGE_SIZE,
+    )
+    mask = TF.crop(
+        mask,
+        top,
+        left,
+        IMAGE_SIZE,
+        IMAGE_SIZE,
+    )
+
+    return image, mask
+
+
 def load_pair(image_path, mask_path, augment):
     try:
         image = load_image(image_path)
@@ -168,15 +217,13 @@ def load_pair(image_path, mask_path, augment):
             f"原因: {type(exc).__name__}: {exc}"
         ) from exc
 
-    image = TF.resize(
+    # Preserve native pixel detail instead of resizing the whole image.
+    # FLAIR 512x512 stays untouched; larger custom images are cropped at
+    # native resolution so tiny vegetation is not smoothed away.
+    image, mask = _native_crop_pair(
         image,
-        [IMAGE_SIZE, IMAGE_SIZE],
-        interpolation=InterpolationMode.BILINEAR,
-    )
-    mask = TF.resize(
         mask,
-        [IMAGE_SIZE, IMAGE_SIZE],
-        interpolation=InterpolationMode.NEAREST,
+        augment,
     )
 
     image = TF.to_tensor(image)
@@ -264,6 +311,47 @@ def masked_dice_loss(logits, targets):
 
     return 1.0 - (dice * class_weights).sum()
 
+def boundary_loss(logits, targets):
+    probs = torch.softmax(logits, dim=1)
+    valid = targets != IGNORE_INDEX
+
+    safe_targets = targets.clone()
+    safe_targets[~valid] = 0
+
+    one_hot = torch.nn.functional.one_hot(
+        safe_targets,
+        NUM_CLASSES,
+    ).permute(0, 3, 1, 2).float()
+
+    valid_mask = valid.unsqueeze(1).float()
+
+    probs = probs * valid_mask
+    one_hot = one_hot * valid_mask
+
+    def morphological_gradient(x):
+        dilated = torch.nn.functional.max_pool2d(
+            x,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        eroded = -torch.nn.functional.max_pool2d(
+            -x,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        return (dilated - eroded).clamp(0.0, 1.0)
+
+    pred_edges = morphological_gradient(probs)
+    target_edges = morphological_gradient(one_hot)
+
+    diff = torch.abs(pred_edges - target_edges) * valid_mask
+    denominator = valid_mask.sum() * NUM_CLASSES
+
+    return diff.sum() / denominator.clamp_min(1.0)
+
+
 def has_valid_pixels(targets):
     return bool((targets != IGNORE_INDEX).any().item())
 
@@ -280,19 +368,22 @@ def safe_segmentation_loss(
     ce = cross_entropy(outputs, masks)
     lovasz = lovasz_loss(outputs, masks)
     dice = masked_dice_loss(outputs, masks)
+    boundary = boundary_loss(outputs, masks)
 
-    # Some Lovasz implementations may return an empty tensor when every
-    # valid class is absent after ignore masking. Fall back to CE + Dice.
+    # Lovasz can return an empty tensor for batches dominated by ignore
+    # pixels. Keep boundary supervision active in that case.
     if lovasz.numel() == 0:
         return (
-            0.60 * ce
-            + 0.40 * dice
+            0.50 * ce
+            + 0.25 * dice
+            + 0.25 * boundary
         )
 
     return (
-        0.35 * ce
-        + 0.45 * lovasz
+        0.30 * ce
+        + 0.30 * lovasz
         + 0.20 * dice
+        + 0.20 * boundary
     )
 
 
@@ -1170,11 +1261,12 @@ def main():
                         "class_names": CLASS_NAMES,
                         "vegetation_class_ids": VEGETATION_CLASS_IDS,
                         "image_size": IMAGE_SIZE,
+                        "crop_mode": "native_resolution_512",
                         "batch_size": BATCH_SIZE,
                         "num_workers": NUM_WORKERS,
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
-                        "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
+                        "loss": "0.30 CE + 0.30 Lovasz + 0.20 Dice + 0.20 Boundary",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "flair_mapping_revision": "v3_brushwood_ignore",
