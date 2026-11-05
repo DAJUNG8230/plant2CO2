@@ -1269,7 +1269,7 @@ def main():
                         "loss": "0.30 CE + 0.30 Lovasz + 0.20 Dice + 0.20 Boundary",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
-                        "flair_mapping_revision": "v3_brushwood_ignore",
+                        "flair_mapping_revision": "v4_plowed_land_bare_soil",
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
