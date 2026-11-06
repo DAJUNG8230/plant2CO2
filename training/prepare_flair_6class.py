@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v4")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v5")
 MANIFEST_DIR = Path("flair_manifests")
 
 SEED = 42
@@ -59,10 +59,10 @@ FLAIR_TO_6 = {
     5: 1,   # water -> Other Non-Veg
     6: 4,   # coniferous -> Trees
     7: 4,   # deciduous -> Trees
-    8: 255, # brushwood -> Ignore (too coarse for precise shrub boundaries)
+    8: 3,   # brushwood -> Shrub (coarse supervision; audit boundaries)
     9: 5,   # vineyard -> Cultivated
     10: 2,  # herbaceous vegetation -> Herbaceous
-    11: 5,  # agricultural land -> Cultivated
+    11: 255, # agricultural land -> Ignore (land-use may include bare soil)
     12: 0,  # plowed land -> Bare Soil (exposed tilled soil is not vegetation)
     13: 1,  # swimming pool -> Other Non-Veg
     14: 1,  # snow -> Other Non-Veg
@@ -130,8 +130,9 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
-    print("Mapping revision: v4 (plowed land is not live vegetation)")
-    print("  8 brushwood -> Ignore")
+    print("Mapping revision: v5 (conservative crop/soil labels + shrub supervision)")
+    print("  8 brushwood -> Shrub (coarse FLAIR annotation)")
+    print(" 11 agricultural land -> Ignore (ambiguous vegetation coverage)")
     print(" 12 plowed land -> Bare Soil")
     print(" 16 mixed -> Trees")
     print(" 17 ligneous -> Trees")

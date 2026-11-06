@@ -80,7 +80,7 @@ if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-OUTPUT_DIR = Path("outputs_training")
+OUTPUT_DIR = Path("outputs_training_v5")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -447,6 +447,45 @@ def iter_mask_paths(dataset):
 
     raise TypeError(
         f"不支援的 dataset 類型: {type(dataset).__name__}"
+    )
+
+
+def audit_validation_masks(dataset):
+    """Fail before training if ground truth cannot evaluate all six classes."""
+    counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+    per_image = np.zeros(NUM_CLASSES, dtype=np.int64)
+    paths = list(iter_mask_paths(dataset))
+    for mask_path in tqdm(paths, desc="V5 validation label audit"):
+        mask = np.asarray(Image.open(mask_path), dtype=np.int64)
+        valid = (mask >= 0) & (mask < NUM_CLASSES)
+        if valid.any():
+            image_counts = np.bincount(mask[valid], minlength=NUM_CLASSES)
+            counts += image_counts
+            per_image += (image_counts > 0).astype(np.int64)
+    print("\nV5 validation class support (full masks):")
+    for i, name in enumerate(CLASS_NAMES):
+        print(f"  {i} {name}: {counts[i]:,} pixels, "
+              f"{per_image[i]:,}/{len(paths):,} masks")
+    missing = [CLASS_NAMES[i] for i in range(NUM_CLASSES) if counts[i] == 0]
+    if missing:
+        raise RuntimeError(
+            "Validation GT missing classes: " + ", ".join(missing)
+            + ". Add labeled examples or change the split before training."
+        )
+
+
+def aggregate_vegetation_coverage_error(cm):
+    """Dataset-wide coverage bias; individual images can differ substantially."""
+    veg = VEGETATION_CLASS_IDS
+    gt_pixels = cm[veg, :].sum().item()
+    predicted_pixels = cm[:, veg].sum().item()
+    total = cm.sum().item()
+    if total == 0:
+        return float("nan"), float("nan"), float("nan")
+    return (
+        100.0 * gt_pixels / total,
+        100.0 * predicted_pixels / total,
+        100.0 * (predicted_pixels - gt_pixels) / total,
     )
 
 
@@ -839,6 +878,8 @@ def main():
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
 
+    audit_validation_masks(val_dataset)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
@@ -1153,6 +1194,13 @@ def main():
                 ious[VEGETATION_CLASS_IDS]
             )
             binary_metrics = calculate_binary_vegetation_metrics(cm)
+            gt_cov, pred_cov, cov_bias = aggregate_vegetation_coverage_error(cm)
+            gt_support = cm.sum(dim=1).cpu().tolist()
+            if any(count == 0 for count in gt_support):
+                print("[WARNING] Missing GT after validation crop: "
+                      + ", ".join(CLASS_NAMES[i] for i, count in enumerate(gt_support)
+                                  if count == 0))
+
 
         print(f"\nEpoch {epoch}")
         print(f"Train Loss: {train_loss:.4f}")
@@ -1173,6 +1221,16 @@ def main():
             print(
                 f"mIoU (vegetation): "
                 f"{miou_vegetation * 100:.2f}%"
+            )
+            print(
+                f"GT vegetation coverage: {gt_cov:.2f}% | "
+                f"Predicted: {pred_cov:.2f}% | "
+                f"Dataset-wide coverage bias: {cov_bias:+.2f} percentage points"
+            )
+            print(
+                "Validation GT pixel support: "
+                + ", ".join(f"{name}={count:,}" for name, count
+                            in zip(CLASS_NAMES, gt_support))
             )
             print(
                 "Binary vegetation IoU: "
@@ -1269,7 +1327,7 @@ def main():
                         "loss": "0.30 CE + 0.30 Lovasz + 0.20 Dice + 0.20 Boundary",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
-                        "flair_mapping_revision": "v4_plowed_land_bare_soil",
+                        "flair_mapping_revision": "v5_ambiguous_agriculture_ignore_brushwood_shrub",
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
