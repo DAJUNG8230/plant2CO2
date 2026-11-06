@@ -60,8 +60,6 @@ MODEL_CONFIG = {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
         "paths": [
-            MODELS_DIR / "best_model_segformer",
-            MODELS_DIR / "segformer_best",
             MODELS_DIR / "segformer_best.pth",
         ],
     },
@@ -123,8 +121,10 @@ def _build_smp_model(model_name, encoder, num_classes):
 
 
 def _load_segformer(model_path):
+    """Load the selected .pth weights using the matching local HF configuration."""
     try:
         from transformers import (
+            SegformerConfig,
             SegformerForSemanticSegmentation,
             SegformerImageProcessor,
         )
@@ -134,61 +134,87 @@ def _load_segformer(model_path):
             "python -m pip install -r requirements.txt"
         ) from exc
 
-    if not model_path.is_dir():
+    if not model_path.is_file() or model_path.suffix.lower() != ".pth":
         raise ValueError(
-            "SegFormer 請使用 Hugging Face save_pretrained() 資料夾格式"
+            "SegFormer 現在指定 models/segformer_best.pth；"
+            "請確認檔案存在且副檔名為 .pth"
         )
 
-    required = [
-        model_path / "config.json",
-        model_path / "preprocessor_config.json",
-    ]
-    if not all(p.exists() for p in required):
+    checkpoint = _load_checkpoint(model_path)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("SegFormer .pth 必須包含 state_dict 或 checkpoint 字典")
+
+    state_dict = checkpoint
+    for key in ("model_state_dict", "state_dict", "model"):
+        if key in checkpoint and isinstance(checkpoint[key], dict):
+            state_dict = checkpoint[key]
+            break
+
+    if not state_dict or not all(isinstance(key, str) for key in state_dict):
+        raise ValueError("SegFormer checkpoint 沒有有效的權重字典")
+
+    state_dict = {
+        (key[7:] if key.startswith("module.") else key): value
+        for key, value in state_dict.items()
+    }
+
+    # A matching HF config is required: a plain state_dict has no architecture
+    # information. Do not silently infer MiT depth or initialize random heads.
+    config_dir = MODELS_DIR / "best_model_segformer"
+    checkpoint_config = checkpoint.get("config")
+    if isinstance(checkpoint_config, dict):
+        config = SegformerConfig.from_dict(checkpoint_config)
+    elif config_dir.is_dir() and (config_dir / "config.json").exists():
+        config = SegformerConfig.from_pretrained(
+            str(config_dir), local_files_only=True
+        )
+    else:
         raise FileNotFoundError(
-            "SegFormer 資料夾缺少 config.json 或 preprocessor_config.json"
+            "segformer_best.pth 缺少網路架構資訊。請保留 "
+            "models/best_model_segformer/config.json，或在 checkpoint "
+            "內提供 config 字典。不可只依檔名推測模型架構。"
         )
 
-    has_weights = (
-        (model_path / "model.safetensors").exists()
-        or (model_path / "pytorch_model.bin").exists()
-    )
-    if not has_weights:
+    if int(config.num_labels) != NUM_CLASSES:
+        raise ValueError(
+            f"SegFormer checkpoint config 為 {config.num_labels} 類，"
+            f"網站要求 {NUM_CLASSES} 類"
+        )
+
+    processor_dir = MODELS_DIR / "best_model_segformer"
+    if not (processor_dir / "preprocessor_config.json").exists():
         raise FileNotFoundError(
-            "SegFormer 資料夾找不到 model.safetensors 或 pytorch_model.bin"
+            "SegFormer 缺少 preprocessor_config.json；"
+            "請保留 models/best_model_segformer 資料夾供影像前處理使用"
         )
-
     processor = SegformerImageProcessor.from_pretrained(
-        str(model_path),
-        local_files_only=True,
-    )
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        str(model_path),
-        local_files_only=True,
+        str(processor_dir), local_files_only=True
     )
 
-    if int(model.config.num_labels) != NUM_CLASSES:
-        raise ValueError(
-            f"SegFormer 必須是 {NUM_CLASSES} 類，"
-            f"目前 config.json num_labels={model.config.num_labels}"
-        )
+    model = SegformerForSemanticSegmentation(config)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "segformer_best.pth 與目前的 SegFormer config 不相容，"
+            "請確認使用相同 MiT 架構與六類輸出，且權重為 "
+            "Hugging Face SegformerForSemanticSegmentation 格式"
+        ) from exc
 
     model.to(DEVICE)
     model.eval()
 
-    raw_id2label = dict(model.config.id2label or {})
-    id2label = {
-        int(k): str(v)
-        for k, v in raw_id2label.items()
-    }
+    raw_id2label = dict(config.id2label or {})
+    id2label = {int(k): str(v) for k, v in raw_id2label.items()}
     if len(id2label) != NUM_CLASSES:
         id2label = {i: name for i, name in enumerate(CLASS_NAMES)}
 
     _PROCESSORS["segformer"] = processor
     _MODEL_META["segformer"] = {
-        "encoder": getattr(model.config, "model_type", "segformer"),
+        "encoder": getattr(config, "model_type", "segformer"),
         "num_classes": NUM_CLASSES,
         "image_size": None,
-        "best_miou": None,
+        "best_miou": checkpoint.get("best_miou"),
         "checkpoint_path": str(model_path),
         "id2label": id2label,
     }

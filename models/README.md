@@ -28,7 +28,8 @@
 models/
 ├─ deeplabv3plus_best.pth
 ├─ unet_best.pth
-└─ best_model_segformer/
+├─ segformer_best.pth            # 實際推論用權重
+└─ best_model_segformer/         # config + processor
    ├─ config.json
    ├─ model.safetensors
    └─ preprocessor_config.json
@@ -78,7 +79,7 @@ num_labels = 6
 }
 ```
 
-網站會直接使用 `SegformerImageProcessor` 與 `SegformerForSemanticSegmentation` 載入本機 Hugging Face 模型。
+網站優先且僅使用 `models/segformer_best.pth` 作為 SegFormer 推論權重。`best_model_segformer/` 資料夾保留 `config.json` 與 `preprocessor_config.json`，僅提供網路架構設定與影像前處理設定，不再使用資料夾中的舊模型權重。\n\n`.pth` 應為 Hugging Face `SegformerForSemanticSegmentation` 的 state_dict，或含 `model_state_dict` / `state_dict` 的 checkpoint；若 checkpoint 內有 `config` 字典會優先使用。必須與六類架構相符。若 `.pth` 來自其他 SegFormer 實作，須先轉換權重，否則會顯示清楚的載入錯誤。
 
 ## 重要
 
