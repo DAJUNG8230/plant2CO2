@@ -46,9 +46,9 @@ CLASS_NAMES = [
 ]
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
-IMAGE_SIZE = 512
-EPOCHS = 50
-LEARNING_RATE = 3e-5
+IMAGE_SIZE = 768
+EPOCHS = 30
+LEARNING_RATE = 1e-5
 EARLY_STOPPING_PATIENCE = 12
 
 NUM_WORKERS = 4
@@ -57,7 +57,9 @@ PIN_MEMORY = True
 VALIDATE_EVERY = 2
 GRAD_NORM_EVERY = 100
 USE_AMP = True
-RESUME_FROM_BEST = False
+RESUME_FROM_BEST = True
+BASELINE_MODEL_PATH = Path("models") / "deeplabv3plus_best.pth"
+BASELINE_VEGETATION_MIOU = 0.7283
 
 GPU_TEMP_LIMIT_C = 80
 GPU_TEMP_CHECK_EVERY_BATCHES = 50
@@ -68,7 +70,7 @@ USE_LABEL_STUDIO = True
 
 # 每個 training epoch 預期抽樣比例。
 # 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
-LABEL_STUDIO_TRAIN_SHARE = 0.20
+LABEL_STUDIO_TRAIN_SHARE = 0.15
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -80,13 +82,13 @@ if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-OUTPUT_DIR = Path("outputs_training")
+OUTPUT_DIR = Path("outputs_training_resume_72")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 
 
 def load_image(path):
@@ -217,13 +219,18 @@ def load_pair(image_path, mask_path, augment):
             f"原因: {type(exc).__name__}: {exc}"
         ) from exc
 
-    # Preserve native pixel detail instead of resizing the whole image.
-    # FLAIR 512x512 stays untouched; larger custom images are cropped at
-    # native resolution so tiny vegetation is not smoothed away.
-    image, mask = _native_crop_pair(
+    # Baseline continuation recipe: reproduce the preprocessing used
+    # by the ~72.83% vegetation-mIoU DeepLabV3+ model.
+    image = TF.resize(
         image,
+        [IMAGE_SIZE, IMAGE_SIZE],
+        interpolation=InterpolationMode.BILINEAR,
+        antialias=True,
+    )
+    mask = TF.resize(
         mask,
-        augment,
+        [IMAGE_SIZE, IMAGE_SIZE],
+        interpolation=InterpolationMode.NEAREST,
     )
 
     image = TF.to_tensor(image)
@@ -368,22 +375,17 @@ def safe_segmentation_loss(
     ce = cross_entropy(outputs, masks)
     lovasz = lovasz_loss(outputs, masks)
     dice = masked_dice_loss(outputs, masks)
-    boundary = boundary_loss(outputs, masks)
 
-    # Lovasz can return an empty tensor for batches dominated by ignore
-    # pixels. Keep boundary supervision active in that case.
     if lovasz.numel() == 0:
         return (
-            0.60 * ce
+            0.70 * ce
             + 0.30 * dice
-            + 0.10 * boundary
         )
 
     return (
         0.35 * ce
-        + 0.40 * lovasz
+        + 0.45 * lovasz
         + 0.20 * dice
-        + 0.05 * boundary
     )
 
 
@@ -860,10 +862,18 @@ def main():
         classes=NUM_CLASSES,
     ).to(DEVICE)
 
-    resume_path = OUTPUT_DIR / "best_model.pth"
-    resumed_miou = -1.0
+    resume_path = BASELINE_MODEL_PATH
+    resumed_miou = BASELINE_VEGETATION_MIOU
 
-    if RESUME_FROM_BEST and resume_path.exists():
+    if RESUME_FROM_BEST:
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                "找不到 baseline 權重："
+                f"{resume_path}\n"
+                "請確認 models\\deeplabv3plus_best.pth "
+                "就是 vegetation mIoU 約 72.83% 的模型。"
+            )
+
         checkpoint = torch.load(
             resume_path,
             map_location=DEVICE,
@@ -874,14 +884,24 @@ def main():
             checkpoint,
         )
         model.load_state_dict(state_dict)
-        resumed_miou = float(
-            checkpoint.get("best_miou", -1.0)
+
+        if isinstance(checkpoint, dict):
+            checkpoint_miou = checkpoint.get("best_miou")
+            if checkpoint_miou is not None:
+                resumed_miou = max(
+                    resumed_miou,
+                    float(checkpoint_miou),
+                )
+
+        print(
+            "\nResumed protected baseline from:",
+            resume_path,
+            f"(baseline vegetation mIoU="
+            f"{resumed_miou * 100:.2f}%)",
         )
         print(
-            "\nResumed from:",
-            resume_path,
-            f"(best vegetation mIoU="
-            f"{resumed_miou * 100:.2f}%)",
+            "New checkpoints will be saved under:",
+            OUTPUT_DIR,
         )
 
     class_weights = torch.tensor(
@@ -924,7 +944,7 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=4,
+        patience=3,
     )
 
     best_vegetation_miou = resumed_miou
@@ -1023,8 +1043,9 @@ def main():
                 batch_index % GRAD_NORM_EVERY == 0
             )
 
+            scaler.unscale_(optimizer)
+
             if should_measure_grad:
-                scaler.unscale_(optimizer)
                 grad_norm_sum += calculate_grad_norm(model)
                 grad_norm_steps += 1
 
@@ -1265,16 +1286,18 @@ def main():
                         "class_names": CLASS_NAMES,
                         "vegetation_class_ids": VEGETATION_CLASS_IDS,
                         "image_size": IMAGE_SIZE,
-                        "crop_mode": "native_resolution_512",
+                        "crop_mode": "resize_768_baseline_continuation",
                         "batch_size": BATCH_SIZE,
                         "num_workers": NUM_WORKERS,
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
-                        "loss": "0.35 CE + 0.40 Lovasz + 0.20 Dice + 0.05 Boundary",
+                        "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "gradient_clip_max_norm": 5.0,
-                        "lr_scheduler_patience": 4,
+                        "baseline_source": str(BASELINE_MODEL_PATH),
+                        "baseline_miou_floor": BASELINE_VEGETATION_MIOU,
+                        "lr_scheduler_patience": 3,
                         "flair_mapping_revision": "v3_brushwood_ignore",
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
