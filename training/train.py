@@ -68,11 +68,11 @@ USE_LABEL_STUDIO = True
 
 # 每個 training epoch 預期抽樣比例。
 # 即使 Label Studio 圖片數遠少於 FLAIR，也讓自有場景有足夠影響力。
-LABEL_STUDIO_TRAIN_SHARE = 0.30
+LABEL_STUDIO_TRAIN_SHARE = 0.20
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Native-detail training settings for Windows + rasterio + RTX 3070 Ti.
+# Stable native-detail training settings for Windows + rasterio + RTX 3070 Ti.
 torch.set_num_threads(6)
 
 if DEVICE.type == "cuda":
@@ -374,16 +374,16 @@ def safe_segmentation_loss(
     # pixels. Keep boundary supervision active in that case.
     if lovasz.numel() == 0:
         return (
-            0.50 * ce
-            + 0.25 * dice
-            + 0.25 * boundary
+            0.60 * ce
+            + 0.30 * dice
+            + 0.10 * boundary
         )
 
     return (
-        0.30 * ce
-        + 0.30 * lovasz
+        0.35 * ce
+        + 0.40 * lovasz
         + 0.20 * dice
-        + 0.20 * boundary
+        + 0.05 * boundary
     )
 
 
@@ -924,7 +924,7 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=2,
+        patience=4,
     )
 
     best_vegetation_miou = resumed_miou
@@ -1028,6 +1028,10 @@ def main():
                 grad_norm_sum += calculate_grad_norm(model)
                 grad_norm_steps += 1
 
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=5.0,
+            )
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
@@ -1266,9 +1270,11 @@ def main():
                         "num_workers": NUM_WORKERS,
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
-                        "loss": "0.30 CE + 0.30 Lovasz + 0.20 Dice + 0.20 Boundary",
+                        "loss": "0.35 CE + 0.40 Lovasz + 0.20 Dice + 0.05 Boundary",
                         "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
+                        "gradient_clip_max_norm": 5.0,
+                        "lr_scheduler_patience": 4,
                         "flair_mapping_revision": "v3_brushwood_ignore",
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
