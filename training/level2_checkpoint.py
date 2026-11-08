@@ -114,3 +114,23 @@ def restore_full(path, *, model, optimizer, scheduler, scaler, expected_metadata
         torch.cuda.set_rng_state_all(payload["rng_cuda"])
     return (int(payload["epoch"]), float(payload["best_miou"]),
             int(payload["epochs_without_improvement"]))
+
+
+def save_best_protected(path, payload):
+    """Atomically replace the best weights while retaining one prior best backup."""
+    import shutil
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="best_", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    try:
+        torch.save(payload, temp_name)
+        if path.exists():
+            old = path.with_name("best_model_previous.pth")
+            backup_temp = old.with_suffix(".tmp")
+            shutil.copy2(path, backup_temp)
+            os.replace(backup_temp, old)
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
