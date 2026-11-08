@@ -70,16 +70,16 @@ python training\level2_review.py approve --id <ID> --confirm APPROVE
 產生 `approved_<ID>.json` 並**不會立刻套用**。人工確認後，在本輪訓練已正常結束或你決定安全停止之後，執行：
 
 ```cmd
-python training\train.py --resume-full outputs_training_v5_level2\latest_state.pth --approved-config outputs_training_v5_level2\approvals\approved_<ID>.json --max-epochs 65
+python training\train.py --resume-full outputs_training_v5_level2\latest_state.pth --approved-config outputs_training_v5_level2\approvals\approved_<ID>.json --max-epochs 50
 ```
 
 若只想延續、不改參數：
 
 ```cmd
-python training\train.py --resume-full outputs_training_v5_level2\latest_state.pth --max-epochs 65
+python training\train.py --resume-full outputs_training_v5_level2\latest_state.pth --max-epochs 50
 ```
 
-`--max-epochs` 是**總 Epoch 上限**，不是額外訓練輪數。若 Epoch 50 已完成，設定 65 可再訓練至最多第 65 輪，但還會受到 early stopping 與指標目標的限制。
+`--max-epochs` 是**總 Epoch 上限**，不是額外訓練輪數，且不允許超過 50。Level 2 總訓練 Epoch 上限固定為 **50**。已訓練到 Epoch 50 的模型不能藉由續訓超出上限；若提前停止，只能在未滿 50 的前提下續訓，仍受到 early stopping 與指標目標限制。
 
 要在未來新實驗中手動提出非預設參數改動，可先設計明確、獨立的實驗方案，經人員審核後再擴充提案生成器；不要直接修改已核准的 JSON，因為會破壞審核紀錄。
 
