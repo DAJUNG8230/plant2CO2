@@ -14,13 +14,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from level2_review import propose_from_status, write_json
+
 CLASSES = ["bare_soil", "other_non-veg", "herbaceous", "shrub", "trees", "cultivated"]
 # train.py uses name.lower().replace(" ", "_"): "other_non-veg_iou".
 EXPECTED = ("epoch", "train_loss", "val_loss", "miou_all", "miou_vegetation",
             "binary_vegetation_iou", "learning_rate")
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_HISTORY = ROOT / "outputs_training_v5" / "history.csv"
-DEFAULT_OUTPUT = ROOT / "outputs_training_v5" / "monitor"
+DEFAULT_HISTORY = ROOT / "outputs_training_v5_level2" / "history.csv"
+DEFAULT_OUTPUT = ROOT / "outputs_training_v5_level2" / "monitor"
 
 
 def number(value):
@@ -211,6 +213,12 @@ def run_once(history, output, use_codex, timeout):
     (output / "status.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "report.md").write_text(render_markdown(report), encoding="utf-8")
+    # Suggestions are deterministic and bounded. Never auto-approve or apply.
+    proposal = propose_from_status(report)
+    if proposal:
+        approvals = output.parent / "approvals"
+        write_json(approvals / ("proposal_" + proposal["id"] + ".json"), proposal)
+        print("待人工審核方案：", approvals / ("proposal_" + proposal["id"] + ".json"))
     print(f"Epoch={report['latest_epoch']}，異常={len(report['alerts'])}，"
           f"報告：{output / 'report.md'}")
     if use_codex and report.get("latest_validation"):
