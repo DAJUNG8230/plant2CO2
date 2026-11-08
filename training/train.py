@@ -4,7 +4,7 @@ import random
 import argparse
 import hashlib
 
-from level2_checkpoint import save_full, restore_full, read_approved, apply_approved
+from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
 
 import numpy as np
 from PIL import Image
@@ -1378,7 +1378,8 @@ def main():
                 best_vegetation_miou = miou_vegetation
                 epochs_without_improvement = 0
 
-                torch.save(
+                save_best_protected(
+                    OUTPUT_DIR / "best_model.pth",
                     {
                         "model_state_dict": model.state_dict(),
                         "encoder": "resnet50",
@@ -1399,7 +1400,6 @@ def main():
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
                     },
-                    OUTPUT_DIR / "best_model.pth",
                 )
 
                 print("Saved best model.")
