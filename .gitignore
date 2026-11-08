@@ -22,6 +22,7 @@ outputs/*
 !outputs/.gitkeep
 mask_checks/
 outputs_training/
+outputs_training_v5/
 
 # Training data / Label Studio exports
 dataset/
