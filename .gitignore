@@ -23,6 +23,7 @@ outputs/*
 mask_checks/
 outputs_training/
 outputs_training_v5/
+outputs_training_v5_level2/
 
 # Training data / Label Studio exports
 dataset/
