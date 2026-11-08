@@ -1036,6 +1036,12 @@ def main():
     # Approval is applied AFTER full-state restoration, so optimizer changes
     # cannot be silently undone by optimizer.load_state_dict.
     apply_approved(approved, optimizer, scheduler)
+    if args.resume_full and approved:
+        # The reviewer explicitly approved a new optimization stage. Retain
+        # model and optimizer state, but reset early-stop patience to provide
+        # a fair window to evaluate the changed hyperparameter.
+        epochs_without_improvement = 0
+        print("Approved next-stage settings applied; early-stop count reset to 0.")
 
     history_header = [
         "epoch",
