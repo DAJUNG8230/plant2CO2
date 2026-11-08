@@ -859,8 +859,8 @@ def main():
                         help="Explicitly human-approved JSON produced by level2_review.py")
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
-    if args.max_epochs < 1:
-        parser.error("--max-epochs must be positive")
+    if not 1 <= args.max_epochs <= EPOCHS:
+        parser.error(f"--max-epochs must be between 1 and {EPOCHS}; Level 2 is capped at 50")
     approved = read_approved(args.approved_config)
     print("Level 2 changes approved for launch:", approved or "none")
     print("Device:", DEVICE)
