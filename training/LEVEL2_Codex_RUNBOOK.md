@@ -92,3 +92,27 @@ python training\train.py --resume-full outputs_training_v5_level2\latest_state.p
 5. Codex `exec --sandbox read-only` 沒有修改原始程式的授權；**不要把 Codex 文字建議直接當成核准的參數設定**。
 6. 目前監控只提供驗證 IoU 和整體覆蓋率診斷。改善真實碳匯/覆蓋率精度必須額外測試人工標註的 Ground Truth。
 7. **尚未在你的本地 GPU / FLAIR 完整資料集上完成端到端續訓驗證**。請先跑單元測試與小型試驗再進行完整訓練。
+
+## 獨立本機審核網頁（不使用 app.py）
+
+在專案根目錄執行：
+
+```cmd
+python training\level2_dashboard.py --port 8765
+```
+
+會自動開啟 http://127.0.0.1:8765/ 。程式只監聽 127.0.0.1，不共用 Flask 或 app.py 連接埠；主網站可照常運行。若連接埠被占用，改用 --port 8766。按 Ctrl+C 停止審核網頁，不會中斷模型訓練。
+
+網頁每 10 秒更新待核准提案、最新 Epoch、最佳植被 mIoU、警告、Codex Token 使用紀錄與可能的短期/長期額度百分比。勾選一筆或多筆提案，再按「確認核准勾選提案」，經二次確認後只會寫入 approved_<ID>.json，不會自動修改訓練、不會自動執行續訓。多筆不同提案可能包含衝突的超參數；請只選擇彼此一致的提案，手動續訓時一次指定一份 approved JSON。
+
+Token 資料僅來自本機 CODEX_HOME/sessions （預設使用者資料夾 .codex/sessions）下的 token_count JSONL 紀錄；不讀取 auth.json，不傳送憑證，不連線至第三方額度 API。只有 Codex 日誌明確包含 rate_limits.used_percent 才顯示 100 - used_percent 的剩餘百分比；否則顯示「無資料」。這是最近可用快照，**不是保證即時同步的帳戶總額度**。欲核對官方額度，請在 Codex 執行 /status 或查看官方用量頁。Token 數與剩餘百分比並非同一種單位。
+
+目前 Level 2 實驗最多訓練到累計 Epoch 50。審核介面不能繞過此限制，也不能把舊版 V5 權重當成完整 checkpoint。
+
+離線測試：
+
+```cmd
+python -m unittest discover -s tests -p test_level2_dashboard.py
+```
+
+**安全提醒**：不要把本機審核服務修改成 0.0.0.0 或用 ngrok 對外公開，因為它可以核准訓練參數。
