@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v4")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v5_unet_aligned")
 MANIFEST_DIR = Path("flair_manifests")
 
 SEED = 42
@@ -52,23 +52,24 @@ CLASS_NAMES = [
 # 5 Cultivated
 # 255 Ignore
 FLAIR_TO_6 = {
+    0: 255, # undefined -> Ignore
     1: 1,   # building -> Other Non-Veg
-    2: 1,   # pervious surface -> Other Non-Veg
+    2: 0,   # pervious surface -> Bare Soil (U-Net LUT)
     3: 1,   # impervious surface -> Other Non-Veg
     4: 0,   # bare soil -> Bare Soil
     5: 1,   # water -> Other Non-Veg
     6: 4,   # coniferous -> Trees
     7: 4,   # deciduous -> Trees
-    8: 255, # brushwood -> Ignore (too coarse for precise shrub boundaries)
+    8: 3,   # brushwood -> Shrub
     9: 5,   # vineyard -> Cultivated
     10: 2,  # herbaceous vegetation -> Herbaceous
     11: 5,  # agricultural land -> Cultivated
-    12: 0,  # plowed land -> Bare Soil (exposed tilled soil is not vegetation)
+    12: 0,  # plowed land -> Bare Soil
     13: 1,  # swimming pool -> Other Non-Veg
     14: 1,  # snow -> Other Non-Veg
-    15: 255, # clear cut -> Ignore (ambiguous)
+    15: 0,  # clear cut -> Bare Soil
     16: 4,  # mixed -> Trees
-    17: 4,  # ligneous -> Trees (visual audit: mostly tree crowns / urban trees)
+    17: 3,  # ligneous -> Shrub
     18: 1,  # greenhouse -> Other Non-Veg
     19: 255, # other -> Ignore
 }
@@ -130,13 +131,14 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
-    print("Mapping revision: v4 (plowed land is not live vegetation)")
-    print("  8 brushwood -> Ignore")
+    print("Mapping revision: v5 U-Net LUT aligned")
+    print("  2 pervious surface -> Bare Soil")
+    print("  8 brushwood -> Shrub")
+    print(" 11 agricultural land -> Cultivated")
     print(" 12 plowed land -> Bare Soil")
-    print(" 16 mixed -> Trees")
-    print(" 17 ligneous -> Trees")
-    print(" 15 clear cut -> Ignore")
-    print(" 19 other -> Ignore")
+    print(" 15 clear cut -> Bare Soil")
+    print(" 17 ligneous -> Shrub")
+
 
     if len(images) != len(labels):
         print("[WARNING] 影像與標記數量不同，會依檔名實際配對。")
