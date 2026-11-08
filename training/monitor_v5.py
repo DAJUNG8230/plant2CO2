@@ -45,7 +45,7 @@ def read_history(path):
                 # Ignore partially written CSV rows. Validation is performed every
                 # 2 epochs; skipped epochs contain nan in validation fields.
                 epoch = number(item.get("epoch"))
-                if epoch is None:
+                if epoch is None or any(item.get(key) is None for key in EXPECTED):
                     continue
                 parsed = {k: number(v) for k, v in item.items() if k}
                 parsed["epoch"] = int(epoch)
