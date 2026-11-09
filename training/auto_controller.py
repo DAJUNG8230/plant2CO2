@@ -83,7 +83,18 @@ def choose_with_codex(candidates, evidence, timeout):
         cwd=ROOT, input=prompt, text=True, encoding="utf-8",
         errors="replace", capture_output=True, check=True, timeout=timeout,
     )
-    decision = json.loads(response.stdout.strip())
+    raw = response.stdout.strip()
+    try:
+        decision = json.loads(raw)
+    except json.JSONDecodeError:
+        # Some CLI versions return a fenced JSON final message.
+        fence = chr(96) * 3
+        if not (raw.startswith(fence) and raw.endswith(fence)):
+            raise ValueError("Codex 沒有輸出唯一合法 JSON，安全跳過執行")
+        inner = raw[len(fence):-len(fence)].strip()
+        if inner.startswith("json"):
+            inner = inner[4:].strip()
+        decision = json.loads(inner)
     if not isinstance(decision, dict) or decision.get("decision") not in ("execute", "skip"):
         raise ValueError("Codex 未回傳合法的選擇 JSON")
     key = decision.get("proposal_id")
