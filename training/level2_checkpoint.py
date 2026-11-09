@@ -41,6 +41,8 @@ def read_approved(path):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("status") != "approved" or payload.get("approval") != "human-confirmed":
         raise ValueError("必須先透過人工確認流程核准參數修改")
+    if payload.get("kind", "training_parameters") != "training_parameters":
+        raise ValueError("這是離線評估審核結果，禁止作為 train.py 的參數設定")
     return validate_changes(payload.get("changes"))
 
 
