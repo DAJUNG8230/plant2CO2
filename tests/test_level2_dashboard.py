@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
-from level2_dashboard import codex_usage, proposals_in
+from level2_dashboard import codex_usage, proposals_in, evidence_state, codex_report_state
 
 
 class DashboardTests(unittest.TestCase):
@@ -59,6 +59,22 @@ class DashboardTests(unittest.TestCase):
             result = codex_usage(tmp)
             self.assertIsNone(result["short"])
             self.assertIsNone(result["long"])
+
+    def test_dashboard_evidence_and_codex_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            monitor = output / "monitor"
+            monitor.mkdir()
+            (monitor / "evidence.json").write_text(json.dumps({
+                "history": {"best_epoch": 12, "rows": 38},
+                "confusion": {"epochs": [{"epoch": 12}, {"epoch": 38}]},
+                "fixed_images": {"available": False, "reason": "missing"}
+            }), encoding="utf-8")
+            (monitor / "codex_review.md").write_text("模型評估重點", encoding="utf-8")
+            summary = evidence_state(output)
+            self.assertEqual(summary["history"]["best_epoch"], 12)
+            self.assertEqual(len(summary["confusion"]["epochs"]), 2)
+            self.assertIn("模型評估重點", codex_report_state(output)["excerpt"])
 
     def test_pending_proposals_hide_approved(self):
         with tempfile.TemporaryDirectory() as tmp:
