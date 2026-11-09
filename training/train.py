@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
-from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS
+from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS, EXPERIMENTS
 
 import numpy as np
 from PIL import Image
@@ -863,7 +863,7 @@ def main():
     parser.add_argument("--allow-auto-approved", action="store_true",
                         help="Explicit opt-in to bounded autonomous Codex proposal")
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
-    parser.add_argument("--experiment-id", choices=("shrub_weight", "cultivated_weight"),
+    parser.add_argument("--experiment-id", choices=tuple(EXPERIMENTS),
                         help="Whitelisted single-variable experiment, isolated output only")
     parser.add_argument("--experiment-seed", type=int, default=42)
     parser.add_argument("--experiment-output", type=Path,
