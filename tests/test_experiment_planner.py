@@ -56,6 +56,14 @@ class ExperimentsTests(unittest.TestCase):
         self.assertIn("shrub_weight", ids)
         self.assertNotIn("shrub_weight_down", ids)
 
+    def test_overpredicted_cultivated_decreases_weight(self):
+        e = self.evidence()
+        e["best_confusion"]["classes"][1]["gt_pixels"] = 100
+        e["best_confusion"]["classes"][1]["predicted_pixels"] = 140
+        ids = {x["id"] for x in choose_candidates(e)}
+        self.assertIn("cultivated_weight_down", ids)
+        self.assertNotIn("cultivated_weight", ids)
+
     def test_skip_does_not_spawn_training(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
