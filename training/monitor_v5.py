@@ -105,6 +105,33 @@ def analyze(rows, gpu, errors):
         alerts.append({"level": "info", "code": "await_validation",
                        "message": "目前還沒有完成驗證的 Epoch。"})
     if current:
+        # Mirror train.py's validation-only patience counting. This is an
+        # inference from history, not a direct confirmation of process state.
+        best_seen = -1.0
+        misses = 0
+        for item in valid:
+            metric = item.get("miou_vegetation")
+            if metric is None:
+                continue
+            if metric > best_seen + 1e-4:
+                best_seen = metric
+                misses = 0
+            else:
+                misses += 1
+        if (misses >= 12 and latest and latest.get("epoch", 50) < 50):
+            alerts.append({
+                "level": "warning",
+                "code": "early_stop_patience_exceeded",
+                "message": (
+                    f"依 history.csv 推算已有 {misses} 次驗證未改善，"
+                    "符合 V5 Early Stopping 12 次的門檻；"
+                    "請比對訓練終端，勿假設程序仍在執行。"
+                ),
+            })
+            recommendations.append(
+                "若要嘗試剩餘 Epoch，應先評估最佳權重與第 38 輪差異；"
+                "只在人工核准的新續訓階段重設早停計數，保留最佳權重。"
+            )
         missing = [c for c in CLASSES if current.get(c + "_iou") is None]
         if missing:
             alerts.append({"level": "warning", "code": "missing_class_iou",
