@@ -228,6 +228,15 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=No
             "--max-epochs", str(epochs),
         ]
         subprocess.run(command, cwd=ROOT, check=True)
+        marker = directory / "training_finished.json"
+        if not marker.is_file():
+            raise RuntimeError("訓練程序沒有正常完成標記，拒絕執行下一個 GPU 實驗")
+        completed = json.loads(marker.read_text(encoding="utf-8"))
+        if completed.get("reason") != "normal_training_loop_exit":
+            raise RuntimeError("訓練非正常完成：" + str(completed.get("reason")))
+        rows_after, errors_after = read_history(directory / "history.csv")
+        if errors_after or not any(row.get("val_loss") is not None for row in rows_after):
+            raise RuntimeError("缺少有效驗證紀錄，拒絕繼續搜尋")
 
     save_decision(status_file, {**record, "status": "running_control",
                                 "control_output": str(control_dir), "output": str(run_dir)})
