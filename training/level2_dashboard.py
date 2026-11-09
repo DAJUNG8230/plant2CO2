@@ -59,6 +59,9 @@ button:disabled{background:#566375;cursor:default}
 <div class="metric">固定影像覆蓋率 MAE<strong id="fixedmae">—</strong></div>
 </div>
 <p class="hint" id="evidencenote">等待 evidence.json，沒有人工標註及預測 mask 時不會計算 MAE。</p></section>
+<section><h2>Codex 詳細分析報告（唯讀）</h2>
+<p class="hint" id="codextime">尚未找到報告</p><pre id="codexreport" style="white-space:pre-wrap;max-height:360px;overflow:auto;padding:15px;background:#102236;border-radius:10px">尚未執行 Codex 分析</pre>
+</section>
 <section><h2>DeepLabV3+ 訓練狀態</h2>
 <div class="metrics">
 <div class="metric">最新 Epoch<strong id="epoch">—</strong></div>
@@ -107,6 +110,8 @@ const best=fixed.aggregates?.best,latest=fixed.aggregates?.latest;
 text("fixedmae",best&&latest?"最佳 "+best.coverage_mae_pp+" / 最後 "+latest.coverage_mae_pp+" pp":"無資料");
 text("evidencenote",fixed.available?"固定影像逐張覆蓋率誤差（百分點），詳見 monitor/evidence.json":
 "固定測試資料尚未齊全："+(fixed.reason||"未取得")+"；最佳模型資訊與混淆方向見 evidence.json");
+text("codexreport",d.codex?.excerpt||"尚未產生 Codex 報告，請先執行 --once --codex");
+text("codextime",d.codex?.modified_unix?"報告檔案最後修改時間："+new Date(d.codex.modified_unix*1000).toLocaleString():"未找到 Codex 分析報告");
 const p=$("proposals");p.replaceChildren();
 const existing=new Set((d.proposals||[]).map(x=>x.id));
 for(const id of selected)if(!existing.has(id))selected.delete(id);
@@ -240,6 +245,17 @@ def evidence_state(output):
         return {}
 
 
+def codex_report_state(output):
+    path = output / "monitor" / "codex_review.md"
+    try:
+        # Bound the dashboard response; keep all details in the Markdown file.
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return {"excerpt": content[:12000],
+                "modified_unix": path.stat().st_mtime, "truncated": len(content) > 12000}
+    except OSError:
+        return {}
+
+
 def handler_factory(output, csrf):
     approvals = output / "approvals"
 
@@ -264,6 +280,7 @@ def handler_factory(output, csrf):
                     "proposals": proposals_in(approvals),
                     "monitor": monitor_state(output),
                     "evidence": evidence_state(output),
+                    "codex": codex_report_state(output),
                 }, ensure_ascii=False))
             else:
                 self.send_body('{"error":"not found"}', 404)
