@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
 from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS, EXPERIMENTS
-from experiment_planner import choose_candidates, plan, comparison
+from experiment_planner import choose_candidates, plan, comparison, reusable_empty_dir
 
 
 class ExperimentsTests(unittest.TestCase):
@@ -63,6 +63,21 @@ class ExperimentsTests(unittest.TestCase):
         ids = {x["id"] for x in choose_candidates(e)}
         self.assertIn("cultivated_weight_down", ids)
         self.assertNotIn("cultivated_weight", ids)
+
+    def test_only_empty_leftover_directories_are_reusable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "control_for_shrub_weight_down_pilot"
+            self.assertTrue(reusable_empty_dir(path))
+            path.mkdir()
+            self.assertTrue(reusable_empty_dir(path))
+            (path / "history.csv").write_text("epoch,loss\\n", encoding="utf-8")
+            self.assertFalse(reusable_empty_dir(path))
+
+    def test_all_registry_ids_are_accepted_by_train_argparse(self):
+        source = (Path(__file__).resolve().parents[1] / "training" / "train.py").read_text(encoding="utf-8")
+        self.assertIn('choices=tuple(EXPERIMENTS)', source)
+        for name in ("baseline_control", "shrub_weight_down", "cultivated_weight_down"):
+            self.assertIn(name, EXPERIMENTS)
 
     def test_skip_does_not_spawn_training(self):
         with tempfile.TemporaryDirectory() as tmp:
