@@ -59,3 +59,32 @@ outputs_training_v5_experiments/
 ## 科學比較的重要限制
 
 每個 pilot 的設定相較於對應的**同起始權重、同訓練輪數的控制組**只改動一種類別權重；但目前程式沒有自動跑這個額外的對照組。因此 `comparison.json` 中「原始 baseline 最佳」對「pilot 最佳」的差異**不能歸因於類別權重改動本身**，因為 pilot 還額外進行了最多 12 輪訓練、重新初始化 Optimizer，且隨機資料順序可能不同。這份比較只能用於初步篩選，不能作為論文的單一變因因果結論。正式比較應另跑一個相同 warm-start、optimizer 初始化、epoch 數、種子與評估流程的無改權重控制組，並且以固定 GT 測試集獨立報告覆蓋率誤差。
+
+## Level 3：混淆方向與有界搜尋（新）
+
+現在的候選不再一律增加類別權重。使用**最佳 Epoch** 的六類混淆矩陣；當 Shrub 或 Cultivated IoU < 55%、GT 像素至少 100 且預測像素相比 GT 有至少 10% 的偏差時，產生相應候選：
+
+| 情況 | 方向 | 改動 |
+|---|---|---|
+| Shrub 預測比 GT 多 >= 10% | 減少假陽性假設 | Shrub CE 權重 1.45 → 1.25 |
+| Shrub 預測比 GT 少 >= 10% | 增加召回假設 | Shrub CE 權重 1.45 → 1.65 |
+| Cultivated 預測比 GT 多 >= 10% | 減少假陽性假設 | Cultivated CE 權重 0.90 → 0.75 |
+| Cultivated 預測比 GT 少 >= 10% | 增加召回假設 | Cultivated CE 權重 0.90 → 1.10 |
+
+判斷的是類別預測面積偏差方向，並不是權重調整的因果證明。Codex 還是可以選 skip。預設每個 pilot **8 Epoch**，同一批次會建立「不更動類別權重的對照組」與「只改一個類別權重的試驗組」，兩者均從現有最佳 checkpoint 初始化新的 optimizer，使用相同 seed 42、資料集、架構、Batch 4、訓練/驗證流程。GPU 非確定性仍可能造成變異；若要研究發表，還應增加重複種子與固定測試集。
+
+在已結束舊版基準訓練、沒有其他相同 GPU 訓練時，先預覽：
+
+```powershell
+.\.venv\Scripts\python.exe training\experiment_planner.py --assume-baseline-stopped
+```
+
+一次授權最多搜尋兩組（**每組包含對照與實驗兩次訓練**，最壞共 4 次 8 Epoch 試驗，耗時較多）：
+
+```powershell
+.\.venv\Scripts\python.exe training\experiment_planner.py --assume-baseline-stopped --execute --max-trials 2
+```
+
+若第一組相對配對控制組的最佳植被 mIoU 與目標類別 IoU **沒有同時正向改善**，搜尋立即停止，不自動進入第二組。已建立的實驗目錄會保留，不能自動覆蓋。結束後可以在 `outputs_training_v5_experiments/monitor/search_summary.json` 查看選擇及結果，個別試驗有 `comparison.json`。本程式不會自行把任何 pilot 模型部署到網站；正式測試仍須核對相同 GSD/GT 的覆蓋率 MAE。
+
+**舊版保護：** baseline 的 `best_model.pth` 是只讀來源，Level 2 的 `history.csv`、`latest_state.pth` 不會被新實驗寫入。主網站 `app.py` 未更動，審核頁維持 `http://127.0.0.1:8765/`。新增程式尚需在 Windows 本機跑單元測試與 GPU 實驗驗證。
