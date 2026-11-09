@@ -3,6 +3,8 @@ import csv
 import random
 import argparse
 import hashlib
+import json
+from datetime import datetime, timezone
 
 from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
 
@@ -856,12 +858,14 @@ def main():
     parser.add_argument("--resume-full", type=Path,
                         help="Resume from full latest_state.pth (trusted local file only)")
     parser.add_argument("--approved-config", type=Path,
-                        help="Explicitly human-approved JSON produced by level2_review.py")
+                        help="Approved JSON from Level 2 manual or Codex-controller workflow")
+    parser.add_argument("--allow-auto-approved", action="store_true",
+                        help="Explicit opt-in to bounded autonomous Codex proposal")
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
     if not 1 <= args.max_epochs <= EPOCHS:
         parser.error(f"--max-epochs must be between 1 and {EPOCHS}; Level 2 is capped at 50")
-    approved = read_approved(args.approved_config)
+    approved = read_approved(args.approved_config, allow_autonomous=args.allow_auto_approved)
     print("Level 2 changes approved for launch:", approved or "none")
     print("Device:", DEVICE)
     print("Classes:")
@@ -1088,6 +1092,10 @@ def main():
     }
 
     stop_for_temperature = False
+    finished_marker = OUTPUT_DIR / "training_finished.json"
+    # Remove old completion marker just before the training loop actually resumes.
+    finished_marker.unlink(missing_ok=True)
+    completed_epoch = start_epoch - 1
 
     for epoch in range(start_epoch, args.max_epochs + 1):
         model.train()
@@ -1440,6 +1448,7 @@ def main():
             metadata=data_fingerprint,
         )
         print(f"Full resumable checkpoint saved: Epoch {epoch}")
+        completed_epoch = epoch
         if stop_after_epoch:
             break
 
@@ -1449,6 +1458,18 @@ def main():
         except Exception:
             pass
 
+    # Written only on a normal completed stop, never on an interrupted epoch.
+    # Atomic marker lets the autonomous watcher distinguish a finished run
+    # from a process still training, crashing, or being killed.
+    marker_data = {
+        "last_epoch": completed_epoch,
+        "max_epochs": args.max_epochs,
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        "reason": "normal_training_loop_exit",
+    }
+    marker_temp = finished_marker.with_suffix(".tmp")
+    marker_temp.write_text(json.dumps(marker_data, ensure_ascii=False), encoding="utf-8")
+    marker_temp.replace(finished_marker)
     print("\nTraining finished.")
     print(
         "Best vegetation mIoU:",
