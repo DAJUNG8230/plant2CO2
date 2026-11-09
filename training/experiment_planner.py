@@ -152,7 +152,7 @@ def comparison(baseline_rows, pilot_path, name):
     first, second = best(baseline_rows), best(pilot_rows)
     if not first or not second:
         return {"available": False, "reason": "需要基準和 pilot 都具有有效驗證資料"}
-    class_key = "shrub_iou" if name == "shrub_weight" else "cultivated_iou"
+    class_key = "shrub_iou" if name.startswith("shrub_weight") else "cultivated_iou"
     baseline_class = first.get(class_key)
     pilot_class = second.get(class_key)
     delta = ((second["miou_vegetation"] - first["miou_vegetation"]) * 100)
@@ -174,12 +174,14 @@ def comparison(baseline_rows, pilot_path, name):
     }
 
 
-def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
+def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=None):
     if not 1 <= epochs <= 20:
         raise ValueError("Pilot epoch count must be 1..20")
     rows = check_baseline(baseline, assume_stopped)
     evidence = collect_evidence(rows, baseline)
-    candidates = choose_candidates(evidence)
+    candidates = [x for x in choose_candidates(evidence)
+                  if x["id"] not in (excluded or set())
+                  and not (output / (x["id"] + "_pilot")).exists()]
     status_file = output / "monitor" / "experiment_decision.json"
     if not candidates:
         state = {"status": "skipped", "decision": "skip",
@@ -259,6 +261,8 @@ def main():
     p.add_argument("--baseline", type=Path, default=BASELINE)
     p.add_argument("--output", type=Path, default=PILOTS)
     p.add_argument("--pilot-epochs", type=int, default=8)
+    p.add_argument("--max-trials", type=int, default=1, choices=(1, 2),
+                   help="Max independent pilot/control pairs; stop on non-improvement")
     p.add_argument("--codex-timeout", type=int, default=180)
     args = p.parse_args()
     if args.output.resolve() != PILOTS.resolve():
@@ -271,8 +275,32 @@ def main():
     except FileExistsError:
         p.error("Another experiment planner may already be running")
     try:
-        plan(args.baseline, args.output, not args.execute, args.assume_baseline_stopped,
-             args.pilot_epochs, args.codex_timeout)
+        tried = set()
+        outcomes = []
+        for trial in range(args.max_trials):
+            result = plan(args.baseline, args.output, not args.execute,
+                          args.assume_baseline_stopped, args.pilot_epochs,
+                          args.codex_timeout, excluded=tried)
+            outcomes.append(result)
+            if not args.execute or result.get("status") != "completed":
+                break
+            selected = result.get("experiment_id")
+            if selected:
+                tried.add(selected)
+            metrics = result.get("comparison", {})
+            delta = metrics.get("vegetation_miou_change_pp")
+            target_delta = metrics.get("focus_iou_change_pp")
+            # Conservative gating: both overall vegetation and target class
+            # must beat their same-seed unchanged-weight control.
+            if (not metrics.get("available") or delta is None or target_delta is None
+                    or delta <= 0 or target_delta <= 0):
+                print("沒有同時改善植被 mIoU 與目標類 IoU，停止後續自動搜尋。")
+                break
+        save_decision(args.output / "monitor" / "search_summary.json", {
+            "trials": outcomes, "completed_trials": len(outcomes),
+            "max_trials": args.max_trials,
+            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        })
     finally:
         lock.unlink(missing_ok=True)
 
