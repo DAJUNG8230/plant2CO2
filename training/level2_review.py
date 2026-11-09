@@ -74,6 +74,34 @@ def propose_from_status(status):
     return payload
 
 
+def evidence_review_proposal(task, status):
+    """Approve an evidence-backed review task, NEVER a model configuration."""
+    code = task.get("task_code")
+    allowed = {
+        "compare_best_last_confusion", "audit_shrub", "audit_cultivated",
+        "collect_fixed_prediction_pairs", "review_coverage_error",
+    }
+    if code not in allowed:
+        raise ValueError("Unknown review task")
+    if not task.get("reason") or not isinstance(task.get("evidence"), list):
+        raise ValueError("Review task lacks evidence references")
+    payload = {
+        "schema": "plant2co2-level2-proposal-v1",
+        "kind": "review_task",
+        "status": "pending",
+        "base_epoch": status.get("latest_epoch"),
+        "changes": {},
+        "task_code": code,
+        "reason": task["reason"],
+        "evidence": task["evidence"],
+        "source": "read_only_evidence",
+        "requires_human_approval": True,
+        "scope": "manual_offline_review_only",
+    }
+    payload["id"] = hashlib.sha256(canonical(payload).encode("utf-8")).hexdigest()[:16]
+    return payload
+
+
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
@@ -108,20 +136,35 @@ def approve(proposal_id, confirmation, output):
     original_id = proposal.pop("id")
     if hashlib.sha256(canonical(proposal).encode("utf-8")).hexdigest()[:16] != original_id:
         raise ValueError("方案內容被修改，拒絕核准")
-    changes = validate_changes(proposal.get("changes"))
+    kind = proposal.get("kind", "training_parameters")
+    if kind == "review_task":
+        if proposal.get("changes") != {} or proposal.get("source") != "read_only_evidence":
+            raise ValueError("審核任務不可更動訓練參數")
+        if proposal.get("task_code") not in {
+            "compare_best_last_confusion", "audit_shrub", "audit_cultivated",
+            "collect_fixed_prediction_pairs", "review_coverage_error",
+        }:
+            raise ValueError("不允許的審核任務")
+        changes = {}
+    elif kind == "training_parameters":
+        changes = validate_changes(proposal.get("changes"))
+    else:
+        raise ValueError("Unknown proposal kind")
     approved = {
         "status": "approved",
+        "kind": kind,
         "approval": "human-confirmed",
         "proposal_id": original_id,
         "approved_at_utc": datetime.now(timezone.utc).isoformat(),
         "changes": changes,
+        "task_code": proposal.get("task_code") if kind == "review_task" else None,
     }
     target = output / ("approved_" + proposal_id + ".json")
     if target.exists():
         raise FileExistsError("此方案已核准，避免重複建立")
     write_json(target, approved)
     print(f"已核准但尚未套用：{target}")
-    print("僅在手動啟動 train.py --approved-config <此檔案> 時才生效。")
+    print("僅在手動啟動 train.py --approved-config <此檔案> 時才生效。" if kind == "training_parameters" else "僅核准離線評估任務，不會套用到 train.py 或執行程式。")
 
 
 def main():
