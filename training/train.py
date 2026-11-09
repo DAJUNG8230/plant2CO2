@@ -1515,7 +1515,7 @@ def main():
         "last_epoch": completed_epoch,
         "max_epochs": args.max_epochs,
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-        "reason": "normal_training_loop_exit",
+        "reason": "gpu_temperature_limit" if stop_for_temperature else "normal_training_loop_exit",
     }
     marker_temp = finished_marker.with_suffix(".tmp")
     marker_temp.write_text(json.dumps(marker_data, ensure_ascii=False), encoding="utf-8")
