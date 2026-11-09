@@ -49,7 +49,7 @@ def choose(evidence, candidates, timeout):
         "只允許從 candidates 選一個現有 id，或 skip；不可以編造參數、命令、模型權重。"
         "重視植被面積誤差與植被四類 mIoU。"
         "如果缺少類別混淆證據、沒有合理假設或只能造成無意義訓練，選 skip。"
-        "候選只修改單一類別 CrossEntropy 權重，測試為探索性，"
+        "候選依 GT/Pred 面積偏差方向只調整一個類別 CrossEntropy 權重，有相同起點未改權重的對照組；試驗仍是探索性，"
         "不能聲稱必定超越既有最佳成績。"
         "只輸出單一合法 JSON 物件，欄位 decision 為 execute 或 skip、"
         "experiment_id 為候選 id 或 null、reason 為繁體中文原因、risk 為風險。"
@@ -87,23 +87,41 @@ def choose(evidence, candidates, timeout):
 
 
 def choose_candidates(evidence):
-    matrix = evidence.get("best_confusion") or evidence.get("latest_confusion")
+    """Generate candidates only when GT/Pred direction in best-epoch confusion
+    supports a class-weight change; do not infer this from IoU alone."""
+    matrix = evidence.get("best_confusion")
     if not matrix:
         return []
     result = []
-    for identifier, name in (("shrub_weight", "Shrub"), ("cultivated_weight", "Cultivated")):
+    specs = (("Shrub", "shrub_weight", "shrub_weight_down"),
+             ("Cultivated", "cultivated_weight", "cultivated_weight_down"))
+    for name, increase_id, decrease_id in specs:
         item = next((x for x in matrix["classes"] if x["class"] == name), None)
-        if item and item.get("iou") is not None and item["iou"] < .55:
-            t = EXPERIMENTS[identifier]
-            result.append({
-                "id": identifier, "changed_class": name,
-                "class_iou": item["iou"],
-                "top_misclassifications": item["top_misclassifications"],
-                "weights_before": [1.20, .80, 1.25, 1.45, 1.00, .90],
-                "weights_after": t["class_weights"],
-                "hypothesis": t["hypothesis"],
-                "risk": t["risk"],
-            })
+        if not item or item.get("iou") is None or item["iou"] >= .55:
+            continue
+        gt, pred = item.get("gt_pixels"), item.get("predicted_pixels")
+        if not isinstance(gt, int) or not isinstance(pred, int) or gt < 100 or pred < 0:
+            continue
+        # >= 10% signed area imbalance is only a screening heuristic;
+        # it does NOT prove the class weight is causal or optimal.
+        if pred >= gt * 1.10:
+            identifier, direction = decrease_id, "overpredicted"
+        elif pred <= gt * .90:
+            identifier, direction = increase_id, "underpredicted"
+        else:
+            continue
+        template = EXPERIMENTS[identifier]
+        result.append({
+            "id": identifier, "changed_class": name,
+            "class_iou": item["iou"], "gt_pixels": gt, "predicted_pixels": pred,
+            "pred_to_gt_ratio": round(pred / gt, 5),
+            "direction": direction,
+            "top_misclassifications": item["top_misclassifications"],
+            "weights_before": EXPERIMENTS["baseline_control"]["class_weights"],
+            "weights_after": template["class_weights"],
+            "hypothesis": template["hypothesis"], "risk": template["risk"],
+            "interpretation": "Candidate hypothesis, not demonstrated causal benefit.",
+        })
     return result
 
 
@@ -186,31 +204,50 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
     if not chosen or dry_run:
         print("此為預覽模式；沒有啟動 GPU 訓練。" if chosen else "Codex 選擇跳過新實驗。")
         return record
-    # Fixed command constructed by this program; no model generated shell input.
+    # A matched unchanged-weight control is mandatory: same starting model,
+    # random seed, train/val data and number of epochs. Experiments are
+    # sequential and remain separate; nothing touches baseline checkpoints.
+    control_dir = output / ("control_for_" + chosen + "_pilot")
     run_dir = output / (chosen + "_pilot")
-    if run_dir.exists():
-        raise FileExistsError("已存在同名實驗目錄；為保護實驗結果，拒絕覆寫：" + str(run_dir))
-    run_dir.mkdir(parents=True)
-    command = [
-        sys.executable, "training/train.py",
-        "--experiment-id", chosen,
-        "--experiment-output", str(run_dir.resolve()),
-        "--init-from-best", str((baseline / "best_model.pth").resolve()),
-        "--max-epochs", str(epochs),
-    ]
-    save_decision(status_file, {**record, "status": "running", "output": str(run_dir)})
-    try:
+    if run_dir.exists() or control_dir.exists():
+        raise FileExistsError("相同實驗/對照組已存在；拒絕覆寫結果")
+    for dirname in (control_dir, run_dir):
+        dirname.mkdir(parents=True, exist_ok=False)
+
+    def run_template(name, directory):
+        command = [
+            sys.executable, "training/train.py",
+            "--experiment-id", name,
+            "--experiment-output", str(directory.resolve()),
+            "--init-from-best", str((baseline / "best_model.pth").resolve()),
+            "--experiment-seed", "42",
+            "--max-epochs", str(epochs),
+        ]
         subprocess.run(command, cwd=ROOT, check=True)
+
+    save_decision(status_file, {**record, "status": "running_control",
+                                "control_output": str(control_dir), "output": str(run_dir)})
+    try:
+        print("先訓練同起點的未調權重對照組：" + str(control_dir), flush=True)
+        run_template("baseline_control", control_dir)
+        save_decision(status_file, {**record, "status": "running_pilot",
+                                    "control_output": str(control_dir), "output": str(run_dir)})
+        print("再訓練 Codex 選出的單變因組：" + str(run_dir), flush=True)
+        run_template(chosen, run_dir)
     except (Exception, KeyboardInterrupt) as exc:
         save_decision(status_file, {**record, "status": "failed",
+                                  "control_output": str(control_dir),
                                   "output": str(run_dir), "error": str(exc)[:300]})
         raise
-    result = comparison(rows, run_dir, chosen)
+    result = comparison(read_history(control_dir / "history.csv")[0], run_dir, chosen)
+    result["reference"] = "matched unchanged-class-weight control, both warm-started from baseline best"
+    result["original_baseline_best_miou"] = evidence["history"]["best_vegetation_miou"]
+    result["control_output"] = str(control_dir)
     save_decision(run_dir / "comparison.json", result)
     state = {**record, "status": "completed", "output": str(run_dir),
-             "comparison": result}
+             "control_output": str(control_dir), "comparison": result}
     save_decision(status_file, state)
-    print("Pilot 最佳結果比較：", json.dumps(result, ensure_ascii=False), flush=True)
+    print("Pilot 與相同起點對照組的比較：", json.dumps(result, ensure_ascii=False), flush=True)
     return state
 
 
@@ -221,7 +258,7 @@ def main():
                    help="For old baseline without finished marker; verify no training is running")
     p.add_argument("--baseline", type=Path, default=BASELINE)
     p.add_argument("--output", type=Path, default=PILOTS)
-    p.add_argument("--pilot-epochs", type=int, default=12)
+    p.add_argument("--pilot-epochs", type=int, default=8)
     p.add_argument("--codex-timeout", type=int, default=180)
     args = p.parse_args()
     if args.output.resolve() != PILOTS.resolve():
