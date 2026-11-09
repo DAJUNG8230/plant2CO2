@@ -191,6 +191,8 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=No
         return state
     decision = choose(evidence, candidates, timeout)
     chosen = decision["experiment_id"]
+    if chosen is not None and chosen not in {item["id"] for item in candidates}:
+        raise ValueError("Codex decision contains non-candidate experiment ID")
     record = {
         **decision, "status": "selected" if chosen else "skipped",
         "base_epoch": rows[-1]["epoch"],
