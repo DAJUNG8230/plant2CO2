@@ -29,21 +29,35 @@ def propose_from_status(status):
     if not isinstance(lr, (float, int)) or lr <= 0:
         return None
 
-    if "possible_overfitting" in alerts:
+    if "early_stop_patience_exceeded" in alerts:
+        # Do not blindly reduce an already tiny LR. A resumed, explicitly
+        # approved stage resets early-stop count in train.py. This exploratory
+        # option retains existing LR and only relaxes scheduler patience.
+        changes = validate_changes({"scheduler_patience": 4})
+        reason = (
+            "已達 Early Stopping 門檻，但累計 Epoch 尚未到 50。"
+            "可考慮核准一個探索性續訓階段：保留目前學習率與最佳權重，"
+            "將 Scheduler Patience 設為 4 並重設早停計數。"
+            "此變更不保證 mIoU 改善；請先檢查最佳權重。"
+        )
+        evidence = "early_stop_patience_exceeded"
+    elif "possible_overfitting" in alerts:
         new_lr = max(1e-7, lr * 0.5)
+        if abs(new_lr - lr) < 1e-12:
+            return None
+        changes = validate_changes({"learning_rate": new_lr})
         reason = "Train Loss 下降但 Val Loss 上升，下一個實驗嘗試減半 LR。"
         evidence = "possible_overfitting"
     elif "miou_plateau" in alerts:
         new_lr = max(1e-7, lr * 0.5)
+        if abs(new_lr - lr) < 1e-12:
+            return None
+        changes = validate_changes({"learning_rate": new_lr})
         reason = "植被 mIoU 停滯；下一階段僅調整 LR。"
         evidence = "miou_plateau"
     else:
         # Never invent hyperparameter changes merely for low class IoU / NaN.
         return None
-
-    if abs(new_lr - lr) < 1e-12:
-        return None
-    changes = validate_changes({"learning_rate": new_lr})
     payload = {
         "schema": "plant2co2-level2-proposal-v1",
         "status": "pending",
