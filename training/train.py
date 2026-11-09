@@ -865,6 +865,7 @@ def main():
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
     parser.add_argument("--experiment-id", choices=("shrub_weight", "cultivated_weight"),
                         help="Whitelisted single-variable experiment, isolated output only")
+    parser.add_argument("--experiment-seed", type=int, default=42)
     parser.add_argument("--experiment-output", type=Path,
                         help="Unique output path under outputs_training_v5_experiments")
     parser.add_argument("--init-from-best", type=Path,
@@ -872,6 +873,15 @@ def main():
     args = parser.parse_args()
     experiment = get_experiment(args.experiment_id) if args.experiment_id else None
     if experiment:
+        if not 0 <= args.experiment_seed <= 2147483647:
+            parser.error("Experiment seed out of range")
+        # Each paired run reinitializes Python / NumPy / torch RNG identically.
+        # CUDA kernels and worker prefetch may remain nondeterministic.
+        random.seed(args.experiment_seed)
+        np.random.seed(args.experiment_seed)
+        torch.manual_seed(args.experiment_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.experiment_seed)
         if args.resume_full or args.approved_config:
             parser.error("Experiment mode cannot resume or apply unrelated approval")
         if not args.experiment_output or not args.init_from_best:
@@ -1043,6 +1053,7 @@ def main():
         "encoder": "resnet50",
         "mapping": "v5_unet_stage3_flair_lut_aligned",
         "experiment_id": args.experiment_id or "baseline",
+        "experiment_seed": args.experiment_seed if experiment else None,
         "class_weights": experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
     }
 
