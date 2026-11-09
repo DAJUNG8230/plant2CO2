@@ -35,7 +35,7 @@ def candidates_at(folder, epoch):
     found = []
     for path in sorted(folder.glob("proposal_*.json")):
         key = path.stem[len("proposal_"):]
-        if not PATTERN.fullmatch(key) or (folder / ("auto_approved_" + key + ".json")).exists():
+        if (not PATTERN.fullmatch(key) or (folder / ("auto_approved_" + key + ".json")).exists() or (folder / ("approved_" + key + ".json")).exists()):
             continue
         try:
             p = json.loads(path.read_text(encoding="utf-8"))
@@ -167,7 +167,13 @@ def process(folder, execute_mode, timeout, require_marker):
     print("理由：" + d["reason"], flush=True)
     print("風險：" + d["risk"], flush=True)
     if match and execute_mode:
-        execute(folder, match, epoch, d, decision_path)
+        try:
+            execute(folder, match, epoch, d, decision_path)
+        except (Exception, KeyboardInterrupt) as exc:
+            save_json(decision_path, {**d, "epoch": epoch, "status": "failed",
+                                      "changes": match["changes"],
+                                      "error": type(exc).__name__ + ": " + str(exc)[:300]})
+            raise
         save_json(decision_path, {**d, "epoch": epoch, "status": "completed",
                                   "changes": match["changes"]})
     elif match:
