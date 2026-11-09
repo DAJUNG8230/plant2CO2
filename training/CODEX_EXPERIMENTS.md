@@ -94,3 +94,26 @@ outputs_training_v5_experiments/
 若看到 `train.py: error: argument --experiment-id: invalid choice: 'baseline_control'`，代表舊版 CLI choices 未同步 Level 3 的 `EXPERIMENTS`。此版已改成從同一份白名單 `experiment_templates.EXPERIMENTS` 讀取所有合法名稱，包含 `baseline_control`、`shrub_weight_down`、`cultivated_weight_down`。
 
 已建立但**完全空白**的 `outputs_training_v5_experiments/control_for_..._pilot` 與 `.../shrub_weight_down_pilot` 可由規劃器安全重用；**任何包含 history.csv、checkpoints、plots、其他檔案的目錄都禁止重用或覆寫**，也不會被自動刪除。更新分支後可先用 `python -m unittest discover -s tests -p test_experiment_planner.py` 測試，再在沒有其他訓練程序執行時重新下相同搜尋指令。
+
+## 修正：Epoch 1 Dice Loss NameError 與安全重試
+
+曾出現 `NameError: name 'experiment' is not defined`，原因是 Dice Loss 函式誤用 `main()` 中的區域變數。現已修正成所有 Level 3 對照組／實驗組共用固定 Dice 權重；**只有 CrossEntropy 類別權重**是實驗變因。新增小批次 forward/backward 回歸測試。
+
+如果上一次在 **Epoch 01 尚未完成任何一輪**就停止，而 PowerShell 已返回提示字元，先更新此分支並跑測試：
+
+```powershell
+git switch feature/deeplab-v5-level3-search
+git pull --ff-only
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_level3_runtime_recovery.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_experiment_planner.py
+```
+
+然後使用明確的 `--recover-failed` 參數重新執行：
+
+```powershell
+.\.venv\Scripts\python.exe training\experiment_planner.py --assume-baseline-stopped --execute --max-trials 2 --recover-failed
+```
+
+這個選項**不會刪除檔案**：它只會核對 `experiment_decision.json` 內記錄的失敗實驗目錄，確認未有任何完成 Epoch、`latest_state.pth` 或 `best_model.pth`，才將舊目錄移至 `outputs_training_v5_experiments/failed_runs/` 保存。若目錄已有真正的權重或訓練歷史，會拒絕自動處理，必須人工核對。若看到目前仍有 `train.py` 執行中，**絕對不要使用此功能**。
+
+避免再次破壞現有完整實驗的原則：原本 `outputs_training_v5_level2/best_model.pth` 只讀取、不修改；所有 Level 3 實驗輸出都存放在 `outputs_training_v5_experiments`。
