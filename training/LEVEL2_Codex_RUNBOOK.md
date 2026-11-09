@@ -132,3 +132,50 @@ python training\monitor_v5.py --once --codex
 網頁仍開著時按「重新整理」，檢查 `outputs_training_v5_level2/approvals/proposal_<ID>.json` 是否出現。若未觸發，開啟 `monitor/status.json` 確認是否有 `early_stop_patience_exceeded`，並檢查監控器是否指向正確 history 路徑。網頁上顯示的 300 / 10080 分鐘剩餘百分比是本機 Codex 上次回報的快照，請看旁邊的更新時間；**頁面刷新不等於 Codex 額度剛更新**。
 
 人工核准只建立 JSON；要在 Epoch 38 的完整狀態上繼續訓練，仍需先核准再**手動**以 `--resume-full`、`--approved-config` 啟動，總 Epoch 上限 50。
+
+## 進階證據分析：完整 History、混淆矩陣與固定圖片
+
+已新增 `training/level2_evidence.py`。它只讀取既有訓練產物，不重新訓練、不更動 LUT 或最佳模型。
+
+監控器現在會輸出 `outputs_training_v5_level2/monitor/evidence.json`，包含完整 `history.csv` 所有 Epoch 的指標、最佳/最新驗證 Epoch、`confusion_matrix_epoch_XXX.csv` 的六類 IoU 與每個 GT 類別最常誤判成哪些 Pred 類別、`best_model.pth` 是否存在及檔案大小。若需要額外讀取**可信本地檔案**的最佳權重 metadata，可使用 `--inspect-checkpoint`（PyTorch `torch.load(..., weights_only=True, mmap=True)`）；監控器不會用它進行推論。
+
+```cmd
+python training\monitor_v5.py --once --codex --inspect-checkpoint
+```
+
+**固定測試圖片：** 如果已有同一組圖的人工 GT 和兩個 checkpoint 的預測 mask，可在 `outputs_training_v5_level2/evaluation/fixed_predictions.csv` 填寫以下欄位，並在相同資料夾中保存相對路徑所指向的遮罩：
+
+```csv
+image_id,gt_mask,pred_best_mask,pred_latest_mask
+scene001,gt/scene001.png,best/scene001.png,latest/scene001.png
+scene002,gt/scene002.png,best/scene002.png,latest/scene002.png
+```
+
+其中每張 mask 必須已對齊、尺寸相同、為單通道 **0–5 類別索引**；GT 可以有 255 ignore。不可把 RGB 彩色渲染遮罩當作類別索引，亦不可把不同尺度的圖片直接比較。本系統不會自動產生這些預測，使用者須先用固定推論條件產生 best / latest 各一份，並使用**相同的人工 GT**。前一輪若沒有保留 Epoch 38 的權重，不能把 `latest_state.pth` 直接當作預測 Mask；須透過相同推論環境讀取該權重，另行生成離線預測。現有 `best_model.pth` 不能用來還原最後輪的權重。
+
+固定圖片有資料時，系統以每張有效 GT 像素計算 GT 與預測植被覆蓋率（類別 2,3,4,5），得到逐張絕對誤差 MAE（百分點）、有號偏差及絕對誤差 P90。這是**像素占比差異**，不等於真實地面面積誤差或碳匯誤差；要估算面積仍需 GSD 或幾何校正。
+
+### 審核網頁的新內容
+
+進入 `http://127.0.0.1:8765/`，可以看到最佳 Epoch、已讀取的混淆矩陣數量、固定圖片 MAE（若有），以及兩種不同的提案：
+
+- **離線評估審核：** 例如檢查 Shrub 最常被誤判成哪類、補齊固定圖片預測、比較最佳與最後輪的混淆矩陣。勾選後只留下人工核准紀錄，**不會**套用於 train.py、也不會自動修改 Loss 或類別權重。
+- **訓練參數提案：** 仍受原本有界的 Learning Rate / Scheduler Patience / Weight Decay 規則限制。此類提案需核准並**手動**指定 `--approved-config` 才會套用。
+
+Codex 會收到完整 JSON 證據，而不是只有最後 Epoch 的摘要，並輸出 `codex_review.md` 研究建議；它產生的自由文字不會直接成為可執行超參數調整。
+
+如需指定另外一組固定測試清單：
+
+```cmd
+python training\monitor_v5.py --once --codex --fixed-manifest outputs_training_v5_level2\evaluation\fixed_predictions.csv
+```
+
+離線測試：
+
+```cmd
+python -m unittest discover -s tests -p test_level2_evidence.py
+python -m unittest discover -s tests -p test_level2.py
+python -m unittest discover -s tests -p test_level2_dashboard.py
+```
+
+**重要：** 舊訓練權重完全保留，Level 2 累計 Epoch 仍最多 50；審核中心繼續只監聽 127.0.0.1:8765，不占用 app.py 連接埠。
