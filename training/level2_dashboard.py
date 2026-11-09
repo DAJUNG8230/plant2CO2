@@ -46,6 +46,17 @@ button:disabled{background:#566375;cursor:default}
 <div class="metric" id="shortcard">短期額度剩餘<strong id="short">無資料</strong><div class="bar"><div id="shortbar" class="fill"></div></div></div>
 <div class="metric" id="longcard">長期額度剩餘<strong id="long">無資料</strong><div class="bar"><div id="longbar" class="fill"></div></div></div>
 </div><p class="hint" id="usageinfo">讀取本機 Codex 日誌中...</p></section>
+<section><h2>Codex 自主實驗決策</h2>
+<div class="metrics">
+<div class="metric">決策狀態<strong id="autostatus">—</strong></div>
+<div class="metric">選中提案<strong id="autopid">—</strong></div>
+<div class="metric">對應 Epoch<strong id="autoepoch">—</strong></div>
+</div>
+<p class="hint" id="autochanges">尚無自動調整方案。</p>
+<p id="autoreason" style="white-space:pre-wrap"></p>
+<p class="hint" id="autorisk"></p>
+<p class="hint">本區只顯示決策紀錄。控制器只有透過本機 PowerShell --execute 才會真的啟動新訓練；此網頁不啟動模型。</p>
+</section>
 <section><h2>待人工審核提案</h2>
 <p class="hint">勾選想核准的提案，按下按鈕後只會建立 approved JSON，不會修改正在運行的訓練。</p>
 <div id="proposals">讀取中...</div>
@@ -104,6 +115,14 @@ text("details","輸入 "+(t.last_input_tokens??"—")+" / 輸出 "+(t.last_outpu
 rate("short",u.short);rate("long",u.long);text("usageinfo",u.message||"尚未取得 Codex 日誌");
 text("epoch",m.latest_epoch);text("miou",typeof m.best_vegetation_miou==="number"?(m.best_vegetation_miou*100).toFixed(2)+"%":"—");
 text("alerts",Array.isArray(m.alerts)?m.alerts.length:"—");
+const auto=d.auto_decision||{};
+text("autostatus",auto.status||"未啟動");
+text("autopid",auto.proposal_id||"未選擇");
+text("autoepoch",auto.epoch);
+text("autochanges",auto.changes&&Object.keys(auto.changes).length?
+"選中參數："+JSON.stringify(auto.changes):"未選擇訓練參數");
+text("autoreason","決策理由："+(auto.reason||"無"));
+text("autorisk","風險："+(auto.risk||"無"));
 const e=d.evidence||{},h=e.history||{},c=e.confusion||{},fixed=e.fixed_images||{};
 text("bestepoch",h.best_epoch);text("cmcount",(c.epochs||[]).length);
 const best=fixed.aggregates?.best,latest=fixed.aggregates?.latest;
@@ -256,6 +275,16 @@ def codex_report_state(output):
         return {}
 
 
+def auto_decision_state(output):
+    try:
+        p = output / "monitor" / "auto_decision.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return {key: d.get(key) for key in
+                ("status", "epoch", "decision", "proposal_id", "changes", "reason", "risk")}
+    except (OSError, ValueError):
+        return {}
+
+
 def handler_factory(output, csrf):
     approvals = output / "approvals"
 
@@ -281,6 +310,7 @@ def handler_factory(output, csrf):
                     "monitor": monitor_state(output),
                     "evidence": evidence_state(output),
                     "codex": codex_report_state(output),
+                    "auto_decision": auto_decision_state(output),
                 }, ensure_ascii=False))
             else:
                 self.send_body('{"error":"not found"}', 404)
