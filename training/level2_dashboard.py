@@ -52,6 +52,13 @@ button:disabled{background:#566375;cursor:default}
 <button id="submit" disabled>確認核准勾選提案</button>
 <button id="refresh">重新整理</button>
 <p id="feedback"></p></section>
+<section><h2>分析證據與最佳模型</h2>
+<div class="metrics">
+<div class="metric">最佳驗證 Epoch<strong id="bestepoch">—</strong></div>
+<div class="metric">已讀混淆矩陣<strong id="cmcount">—</strong></div>
+<div class="metric">固定影像覆蓋率 MAE<strong id="fixedmae">—</strong></div>
+</div>
+<p class="hint" id="evidencenote">等待 evidence.json，沒有人工標註及預測 mask 時不會計算 MAE。</p></section>
 <section><h2>DeepLabV3+ 訓練狀態</h2>
 <div class="metrics">
 <div class="metric">最新 Epoch<strong id="epoch">—</strong></div>
@@ -78,10 +85,10 @@ checkbox.checked=selected.has(p.id);checkbox.onchange=()=>{
 if(checkbox.checked)selected.add(p.id);else selected.delete(p.id);
 $("submit").disabled=!selected.size;};
 const wrapper=document.createElement("div");
-const title=document.createElement("b");title.textContent="方案 "+p.id+" ｜ Epoch "+p.base_epoch;
+const title=document.createElement("b");title.textContent=(p.kind==="review_task"?"離線評估審核 ":"訓練參數提案 ")+p.id+" ｜ Epoch "+p.base_epoch;
 const reason=document.createElement("p");reason.textContent=p.reason||"無說明";
-const code=document.createElement("code");code.textContent=JSON.stringify(p.changes);
-const sub=document.createElement("p");sub.className="hint";sub.textContent="異常依據："+(p.evidence||"未知")+"；只在下次手動啟動或續訓時生效";
+const code=document.createElement("code");code.textContent=p.kind==="review_task"?"僅核准調查項目，不修改訓練參數":JSON.stringify(p.changes);
+const sub=document.createElement("p");sub.className="hint";sub.textContent="依據："+JSON.stringify(p.evidence||"未知")+(p.kind==="review_task"?"；核准後需人工完成離線評估":"；僅在下一次手動啟動/續訓時生效");
 wrapper.append(title,reason,code,sub);label.append(checkbox,wrapper);return label;
 }
 async function refresh(){
@@ -94,6 +101,12 @@ text("details","輸入 "+(t.last_input_tokens??"—")+" / 輸出 "+(t.last_outpu
 rate("short",u.short);rate("long",u.long);text("usageinfo",u.message||"尚未取得 Codex 日誌");
 text("epoch",m.latest_epoch);text("miou",typeof m.best_vegetation_miou==="number"?(m.best_vegetation_miou*100).toFixed(2)+"%":"—");
 text("alerts",Array.isArray(m.alerts)?m.alerts.length:"—");
+const e=d.evidence||{},h=e.history||{},c=e.confusion||{},fixed=e.fixed_images||{};
+text("bestepoch",h.best_epoch);text("cmcount",(c.epochs||[]).length);
+const best=fixed.aggregates?.best,latest=fixed.aggregates?.latest;
+text("fixedmae",best&&latest?"最佳 "+best.coverage_mae_pp+" / 最後 "+latest.coverage_mae_pp+" pp":"無資料");
+text("evidencenote",fixed.available?"固定影像逐張覆蓋率誤差（百分點），詳見 monitor/evidence.json":
+"固定測試資料尚未齊全："+(fixed.reason||"未取得")+"；最佳模型資訊與混淆方向見 evidence.json");
 const p=$("proposals");p.replaceChildren();
 const existing=new Set((d.proposals||[]).map(x=>x.id));
 for(const id of selected)if(!existing.has(id))selected.delete(id);
@@ -105,7 +118,7 @@ $("submit").disabled=!selected.size;
 $("refresh").onclick=refresh;
 $("submit").onclick=async()=>{
 const ids=[...selected];if(!ids.length)return;
-if(!confirm("確認核准 "+ids.length+" 個參數提案？只會寫入核准檔，不會開始訓練。"))return;
+if(!confirm("確認核准 "+ids.length+" 個提案或離線評估項目？只會寫入核准檔，不會開始訓練。"))return;
 $("submit").disabled=true;
 try{
 const response=await fetch("/api/approve",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({ids:ids})});
@@ -195,7 +208,7 @@ def proposals_in(folder):
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
             if item.get("id") == id_ and item.get("status") == "pending":
-                result.append({key: item.get(key) for key in ("id", "base_epoch", "reason", "changes", "evidence")})
+                result.append({key: item.get(key) for key in ("id", "kind", "task_code", "base_epoch", "reason", "changes", "evidence")})
         except (OSError, ValueError):
             continue
     return result[-100:]
@@ -206,6 +219,24 @@ def monitor_state(output):
         status = json.loads((output / "monitor" / "status.json").read_text(encoding="utf-8"))
         return {key: status.get(key) for key in ("latest_epoch", "best_vegetation_miou", "alerts")}
     except (OSError, ValueError):
+        return {}
+
+
+def evidence_state(output):
+    try:
+        p = output / "monitor" / "evidence.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return {
+            "history": {k: d.get("history", {}).get(k) for k in
+                        ("rows", "best_epoch", "best_vegetation_miou", "latest_valid_epoch")},
+            "confusion": {"epochs": [
+                {"epoch": x.get("epoch")} for x in d.get("confusion", {}).get("epochs", [])
+            ]},
+            "fixed_images": {"available": d.get("fixed_images", {}).get("available"),
+                             "aggregates": d.get("fixed_images", {}).get("aggregates"),
+                             "reason": d.get("fixed_images", {}).get("reason")},
+        }
+    except (OSError, ValueError, TypeError):
         return {}
 
 
@@ -232,6 +263,7 @@ def handler_factory(output, csrf):
                     "usage": codex_usage(),
                     "proposals": proposals_in(approvals),
                     "monitor": monitor_state(output),
+                    "evidence": evidence_state(output),
                 }, ensure_ascii=False))
             else:
                 self.send_body('{"error":"not found"}', 404)
