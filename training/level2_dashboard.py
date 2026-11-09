@@ -57,6 +57,16 @@ button:disabled{background:#566375;cursor:default}
 <p class="hint" id="autorisk"></p>
 <p class="hint">本區只顯示決策紀錄。控制器只有透過本機 PowerShell --execute 才會真的啟動新訓練；此網頁不啟動模型。</p>
 </section>
+<section><h2>Codex 自主新實驗（不覆蓋基準模型）</h2>
+<div class="metrics">
+<div class="metric">實驗狀態<strong id="pilotstatus">—</strong></div>
+<div class="metric">選擇的方案<strong id="pilotid">—</strong></div>
+<div class="metric">Pilot Epoch 上限<strong id="pilotepochs">—</strong></div>
+</div>
+<p id="pilotreason" style="white-space:pre-wrap"></p>
+<p id="pilotrisk" class="hint"></p>
+<p class="hint">此面板只顯示控制器決策。新實驗在獨立資料夾執行，不佔用主網站 app.py 連接埠。</p>
+</section>
 <section><h2>待人工審核提案</h2>
 <p class="hint">勾選想核准的提案，按下按鈕後只會建立 approved JSON，不會修改正在運行的訓練。</p>
 <div id="proposals">讀取中...</div>
@@ -115,6 +125,12 @@ text("details","輸入 "+(t.last_input_tokens??"—")+" / 輸出 "+(t.last_outpu
 rate("short",u.short);rate("long",u.long);text("usageinfo",u.message||"尚未取得 Codex 日誌");
 text("epoch",m.latest_epoch);text("miou",typeof m.best_vegetation_miou==="number"?(m.best_vegetation_miou*100).toFixed(2)+"%":"—");
 text("alerts",Array.isArray(m.alerts)?m.alerts.length:"—");
+const pilot=d.experiment_decision||{};
+text("pilotstatus",pilot.status||"未啟動");
+text("pilotid",pilot.experiment_id||"未選擇");
+text("pilotepochs",pilot.pilot_epochs);
+text("pilotreason","Codex 理由："+(pilot.reason||"尚無決策"));
+text("pilotrisk","實驗風險："+(pilot.risk||"—"));
 const auto=d.auto_decision||{};
 text("autostatus",auto.status||"未啟動");
 text("autopid",auto.proposal_id||"未選擇");
@@ -285,6 +301,16 @@ def auto_decision_state(output):
         return {}
 
 
+def experiment_decision_state():
+    try:
+        path = ROOT / "outputs_training_v5_experiments" / "monitor" / "experiment_decision.json"
+        decision = json.loads(path.read_text(encoding="utf-8"))
+        return {key: decision.get(key) for key in
+                ("status", "decision", "experiment_id", "reason", "risk", "pilot_epochs", "output")}
+    except (OSError, ValueError):
+        return {}
+
+
 def handler_factory(output, csrf):
     approvals = output / "approvals"
 
@@ -311,6 +337,7 @@ def handler_factory(output, csrf):
                     "evidence": evidence_state(output),
                     "codex": codex_report_state(output),
                     "auto_decision": auto_decision_state(output),
+                    "experiment_decision": experiment_decision_state(),
                 }, ensure_ascii=False))
             else:
                 self.send_body('{"error":"not found"}', 404)

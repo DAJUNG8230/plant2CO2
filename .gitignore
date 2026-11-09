@@ -41,3 +41,5 @@ models/best_model_segformer/
 
 # Logs
 *.log
+
+outputs_training_v5_experiments/
