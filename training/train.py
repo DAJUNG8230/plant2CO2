@@ -309,8 +309,11 @@ def masked_dice_loss(logits, targets):
         denominator + 1e-6
     )
 
+    # Dice weighting is fixed across all Level 3 pilot/control runs.
+    # The one allowed experiment variable is the CrossEntropy class weight
+    # configured in main(). Never reference main()-local experiment here.
     class_weights = torch.tensor(
-        experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
+        BASE_CLASS_WEIGHTS,
         device=logits.device,
         dtype=dice.dtype,
     )
