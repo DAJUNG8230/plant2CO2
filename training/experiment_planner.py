@@ -183,6 +183,59 @@ def reusable_empty_dir(path):
     return not path.exists() or (path.is_dir() and not any(path.iterdir()))
 
 
+def archive_failed_preflight(output):
+    """Explicit recovery for folders left before a single training epoch completed.
+
+    Only handles directories recorded in the most recent failed planner run.
+    Moves existing content into failed_runs; never deletes user artifacts.
+    """
+    status = output / "monitor" / "experiment_decision.json"
+    if not status.is_file():
+        raise RuntimeError("沒有上次失敗紀錄，拒絕自動搬移")
+    record = json.loads(status.read_text(encoding="utf-8"))
+    if record.get("status") != "failed" or not record.get("experiment_id"):
+        raise RuntimeError("只有失敗的實驗才允許恢復目錄")
+    identifier = record["experiment_id"]
+    if identifier not in EXPERIMENTS or identifier == "baseline_control":
+        raise RuntimeError("不允許的舊實驗代號")
+    expected = [
+        output / ("control_for_" + identifier + "_pilot"),
+        output / (identifier + "_pilot"),
+    ]
+    paths = [Path(record.get("control_output", "")), Path(record.get("output", ""))]
+    if any(p.resolve() != e.resolve() for p, e in zip(paths, expected)):
+        raise RuntimeError("失敗紀錄中的路徑不符，拒絕自動搬移")
+    for folder in expected:
+        if not folder.exists():
+            continue
+        if not folder.is_dir():
+            raise RuntimeError("無法恢復：路徑不是資料夾")
+        if (folder / "latest_state.pth").exists() or (folder / "best_model.pth").exists():
+            raise RuntimeError("資料夾包含已訓練的權重，需人工檢查；不自動搬移")
+        rows, errors = read_history(folder / "history.csv")
+        if rows:
+            raise RuntimeError("資料夾包含已完成 Epoch，需人工檢查；不自動搬移")
+        if errors and (folder / "history.csv").is_file():
+            # An empty/header-only history.csv is expected after failure.
+            try:
+                with (folder / "history.csv").open(encoding="utf-8-sig") as stream:
+                    if len(stream.readlines()) > 1:
+                        raise RuntimeError("存在非空訓練記錄，需人工檢查")
+            except UnicodeError as exc:
+                raise RuntimeError("無法安全解讀 history.csv") from exc
+    archive_root = output / "failed_runs"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    for folder in expected:
+        if folder.exists():
+            destination = archive_root / (folder.name + "_" + stamp)
+            folder.rename(destination)
+            print("已保留未完成資料至：" + str(destination), flush=True)
+    record["status"] = "archived_failed_preflight"
+    save_decision(status, record)
+
+
 def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=None):
     if not 1 <= epochs <= 20:
         raise ValueError("Pilot epoch count must be 1..20")
@@ -281,6 +334,8 @@ def main():
                    help="For old baseline without finished marker; verify no training is running")
     p.add_argument("--baseline", type=Path, default=BASELINE)
     p.add_argument("--output", type=Path, default=PILOTS)
+    p.add_argument("--recover-failed", action="store_true",
+                   help="Archive only failed pre-epoch folders without weights; never delete")
     p.add_argument("--pilot-epochs", type=int, default=8)
     p.add_argument("--max-trials", type=int, default=1, choices=(1, 2),
                    help="Max independent pilot/control pairs; stop on non-improvement")
@@ -296,6 +351,8 @@ def main():
     except FileExistsError:
         p.error("Another experiment planner may already be running")
     try:
+        if args.recover_failed:
+            archive_failed_preflight(args.output)
         tried = set()
         outcomes = []
         for trial in range(args.max_trials):
