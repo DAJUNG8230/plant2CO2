@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
+from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS
 
 import numpy as np
 from PIL import Image
@@ -309,7 +310,7 @@ def masked_dice_loss(logits, targets):
     )
 
     class_weights = torch.tensor(
-        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+        experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
         device=logits.device,
         dtype=dice.dtype,
     )
@@ -862,7 +863,30 @@ def main():
     parser.add_argument("--allow-auto-approved", action="store_true",
                         help="Explicit opt-in to bounded autonomous Codex proposal")
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
+    parser.add_argument("--experiment-id", choices=("shrub_weight", "cultivated_weight"),
+                        help="Whitelisted single-variable experiment, isolated output only")
+    parser.add_argument("--experiment-output", type=Path,
+                        help="Unique output path under outputs_training_v5_experiments")
+    parser.add_argument("--init-from-best", type=Path,
+                        help="Trusted local best checkpoint, weights only and new optimizer")
     args = parser.parse_args()
+    experiment = get_experiment(args.experiment_id) if args.experiment_id else None
+    if experiment:
+        if args.resume_full or args.approved_config:
+            parser.error("Experiment mode cannot resume or apply unrelated approval")
+        if not args.experiment_output or not args.init_from_best:
+            parser.error("Experiment requires --experiment-output and --init-from-best")
+        root = (Path.cwd() / "outputs_training_v5_experiments").resolve()
+        target = args.experiment_output.resolve()
+        if root not in target.parents or target == root or len(target.relative_to(root).parts) != 1:
+            parser.error("Experiment output must be a single unique subdirectory within outputs_training_v5_experiments")
+        global OUTPUT_DIR, PLOT_DIR
+        OUTPUT_DIR = target
+        PLOT_DIR = OUTPUT_DIR / "plots"
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        PLOT_DIR.mkdir(parents=True, exist_ok=True)
+        if not 1 <= args.max_epochs <= 20:
+            parser.error("Pilot experiments are limited to 1..20 epochs")
     if not 1 <= args.max_epochs <= EPOCHS:
         parser.error(f"--max-epochs must be between 1 and {EPOCHS}; Level 2 is capped at 50")
     approved = read_approved(args.approved_config, allow_autonomous=args.allow_auto_approved)
@@ -922,6 +946,19 @@ def main():
 
     resume_path = OUTPUT_DIR / "best_model.pth"
     resumed_miou = -1.0
+    if experiment:
+        # New experiment runs are initialized from the preserved baseline
+        # best weights, but optimizer/scheduler and early stopping are new.
+        original = args.init_from_best.resolve()
+        if original == (OUTPUT_DIR / "best_model.pth").resolve() or not original.is_file():
+            raise ValueError("Experiment source must be an existing external best checkpoint")
+        source = torch.load(original, map_location="cpu", weights_only=True)
+        if not isinstance(source, dict) or "model_state_dict" not in source:
+            raise ValueError("Invalid baseline checkpoint format")
+        if source.get("num_classes") != NUM_CLASSES or source.get("encoder") != "resnet50":
+            raise ValueError("Baseline encoder/classes mismatch")
+        model.load_state_dict(source["model_state_dict"], strict=True)
+        print("New independent experiment warm-started from:", original)
 
     if RESUME_FROM_BEST and resume_path.exists():
         checkpoint = torch.load(
@@ -1005,6 +1042,8 @@ def main():
         "image_size": IMAGE_SIZE,
         "encoder": "resnet50",
         "mapping": "v5_unet_stage3_flair_lut_aligned",
+        "experiment_id": args.experiment_id or "baseline",
+        "class_weights": experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
     }
 
     start_epoch = 1
@@ -1107,7 +1146,7 @@ def main():
 
         train_progress = tqdm(
             train_loader,
-            desc=f"Epoch {epoch:02d}/{EPOCHS} Train",
+            desc=f"Epoch {epoch:02d}/{args.max_epochs} Train",
             dynamic_ncols=True,
             leave=True,
             mininterval=0.5,
@@ -1194,7 +1233,7 @@ def main():
         should_validate = (
             epoch % VALIDATE_EVERY == 0
             or epoch == 1
-            or epoch == EPOCHS
+            or epoch == args.max_epochs
         )
 
         val_loss = float("nan")
@@ -1407,7 +1446,7 @@ def main():
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
                         "loss": "0.30 CE + 0.30 Lovasz + 0.20 Dice + 0.20 Boundary",
-                        "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+                        "class_weights": experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "flair_mapping_revision": "v5_unet_stage3_flair_lut_aligned",
                         "best_miou": best_vegetation_miou,
