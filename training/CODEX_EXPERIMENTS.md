@@ -88,3 +88,9 @@ outputs_training_v5_experiments/
 若第一組相對配對控制組的最佳植被 mIoU 與目標類別 IoU **沒有同時正向改善**，搜尋立即停止，不自動進入第二組。已建立的實驗目錄會保留，不能自動覆蓋。結束後可以在 `outputs_training_v5_experiments/monitor/search_summary.json` 查看選擇及結果，個別試驗有 `comparison.json`。本程式不會自行把任何 pilot 模型部署到網站；正式測試仍須核對相同 GSD/GT 的覆蓋率 MAE。
 
 **舊版保護：** baseline 的 `best_model.pth` 是只讀來源，Level 2 的 `history.csv`、`latest_state.pth` 不會被新實驗寫入。主網站 `app.py` 未更動，審核頁維持 `http://127.0.0.1:8765/`。新增程式尚需在 Windows 本機跑單元測試與 GPU 實驗驗證。
+
+## Level 3 修正：舊 argparse 選項與失敗後重試
+
+若看到 `train.py: error: argument --experiment-id: invalid choice: 'baseline_control'`，代表舊版 CLI choices 未同步 Level 3 的 `EXPERIMENTS`。此版已改成從同一份白名單 `experiment_templates.EXPERIMENTS` 讀取所有合法名稱，包含 `baseline_control`、`shrub_weight_down`、`cultivated_weight_down`。
+
+已建立但**完全空白**的 `outputs_training_v5_experiments/control_for_..._pilot` 與 `.../shrub_weight_down_pilot` 可由規劃器安全重用；**任何包含 history.csv、checkpoints、plots、其他檔案的目錄都禁止重用或覆寫**，也不會被自動刪除。更新分支後可先用 `python -m unittest discover -s tests -p test_experiment_planner.py` 測試，再在沒有其他訓練程序執行時重新下相同搜尋指令。
