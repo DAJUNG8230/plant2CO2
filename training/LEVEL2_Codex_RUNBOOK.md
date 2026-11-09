@@ -179,3 +179,5 @@ python -m unittest discover -s tests -p test_level2_dashboard.py
 ```
 
 **重要：** 舊訓練權重完全保留，Level 2 累計 Epoch 仍最多 50；審核中心繼續只監聽 127.0.0.1:8765，不占用 app.py 連接埠。
+
+現在本機審核頁也會以唯讀方式顯示 `codex_review.md` 最新內容（最多預覽前 12,000 字元，完整報告留在檔案中），並標示其檔案更新時間。若仍看到舊版本介面，請先停止舊的 `level2_dashboard.py` 視窗，重新啟動程式，瀏覽器再重新整理。
