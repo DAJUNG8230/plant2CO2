@@ -1,6 +1,10 @@
 from pathlib import Path
 import csv
 import random
+import argparse
+import hashlib
+
+from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
 
 import numpy as np
 from PIL import Image
@@ -80,7 +84,7 @@ if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-OUTPUT_DIR = Path("outputs_training_v5")
+OUTPUT_DIR = Path("outputs_training_v5_level2")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -848,6 +852,17 @@ def build_datasets():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="DeepLab V5 controlled Level 2 experiment")
+    parser.add_argument("--resume-full", type=Path,
+                        help="Resume from full latest_state.pth (trusted local file only)")
+    parser.add_argument("--approved-config", type=Path,
+                        help="Explicitly human-approved JSON produced by level2_review.py")
+    parser.add_argument("--max-epochs", type=int, default=EPOCHS)
+    args = parser.parse_args()
+    if not 1 <= args.max_epochs <= EPOCHS:
+        parser.error(f"--max-epochs must be between 1 and {EPOCHS}; Level 2 is capped at 50")
+    approved = read_approved(args.approved_config)
+    print("Level 2 changes approved for launch:", approved or "none")
     print("Device:", DEVICE)
     print("Classes:")
     for i, name in enumerate(CLASS_NAMES):
@@ -972,6 +987,62 @@ def main():
     epochs_without_improvement = 0
     history_path = OUTPUT_DIR / "history.csv"
 
+    def digest(path):
+        if not path.exists():
+            return "missing"
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    data_fingerprint = {
+        "flair_train_manifest_sha256": digest(Path("flair_manifests/train.csv")),
+        "flair_val_manifest_sha256": digest(Path("flair_manifests/val.csv")),
+        "num_train": len(train_dataset),
+        "num_val": len(val_dataset),
+        "classes": CLASS_NAMES,
+        "image_size": IMAGE_SIZE,
+        "encoder": "resnet50",
+        "mapping": "v5_unet_stage3_flair_lut_aligned",
+    }
+
+    start_epoch = 1
+    if args.resume_full:
+        if not history_path.exists():
+            raise FileNotFoundError(
+                "Resume history.csv 缺失，為避免覆寫訓練紀錄已停止；"
+                "請還原相同實驗的 history.csv。"
+            )
+        previous_epoch, best_vegetation_miou, epochs_without_improvement = (
+            restore_full(
+                args.resume_full, model=model, optimizer=optimizer,
+                scheduler=scheduler, scaler=scaler,
+                expected_metadata=data_fingerprint,
+            )
+        )
+        with history_path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        if not rows or int(rows[-1]["epoch"]) != previous_epoch:
+            raise RuntimeError(
+                "history.csv 最後 Epoch 與完整 checkpoint 不一致；"
+                "請先恢復相同版本的歷史紀錄。"
+            )
+        start_epoch = previous_epoch + 1
+        print(f"Fully resumed through epoch {previous_epoch}")
+    elif history_path.exists() or (OUTPUT_DIR / "latest_state.pth").exists():
+        raise FileExistsError(
+            "Level 2 目錄已有訓練紀錄或 checkpoint。"
+            "請用 --resume-full outputs_training_v5_level2/latest_state.pth "
+            "續訓，或手動備份後建立新的實驗目錄。"
+        )
+
+    # Approval is applied AFTER full-state restoration, so optimizer changes
+    # cannot be silently undone by optimizer.load_state_dict.
+    apply_approved(approved, optimizer, scheduler)
+    if args.resume_full and approved:
+        # The reviewer explicitly approved a new optimization stage. Retain
+        # model and optimizer state, but reset early-stop patience to provide
+        # a fair window to evaluate the changed hyperparameter.
+        epochs_without_improvement = 0
+        print("Approved next-stage settings applied; early-stop count reset to 0.")
+
     history_header = [
         "epoch",
         "train_loss",
@@ -991,13 +1062,14 @@ def main():
         "grad_norm",
     ]
 
-    with open(
-        history_path,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as f:
-        csv.writer(f).writerow(history_header)
+    if start_epoch == 1:
+        with open(
+            history_path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as f:
+            csv.writer(f).writerow(history_header)
 
     plot_history = {
         "epoch": [],
@@ -1017,7 +1089,7 @@ def main():
 
     stop_for_temperature = False
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(start_epoch, args.max_epochs + 1):
         model.train()
         train_loss = 0.0
         valid_train_batches = 0
@@ -1306,12 +1378,14 @@ def main():
         if DEVICE.type == "cuda":
             torch.cuda.empty_cache()
 
+        stop_after_epoch = False
         if should_validate:
             if miou_vegetation > best_vegetation_miou + 1e-4:
                 best_vegetation_miou = miou_vegetation
                 epochs_without_improvement = 0
 
-                torch.save(
+                save_best_protected(
+                    OUTPUT_DIR / "best_model.pth",
                     {
                         "model_state_dict": model.state_dict(),
                         "encoder": "resnet50",
@@ -1332,7 +1406,6 @@ def main():
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
                     },
-                    OUTPUT_DIR / "best_model.pth",
                 )
 
                 print("Saved best model.")
@@ -1342,7 +1415,7 @@ def main():
                         "\nTarget reached: vegetation mIoU "
                         f">= {TARGET_VEGETATION_MIOU * 100:.0f}%"
                     )
-                    break
+                    stop_after_epoch = True
             else:
                 epochs_without_improvement += 1
                 print(
@@ -1356,7 +1429,19 @@ def main():
                     "\nEarly stopping: vegetation mIoU "
                     "has not improved."
                 )
-                break
+                stop_after_epoch = True
+
+        save_full(
+            OUTPUT_DIR / "latest_state.pth",
+            model=model, optimizer=optimizer, scheduler=scheduler,
+            scaler=scaler, epoch=epoch,
+            best_miou=best_vegetation_miou,
+            no_improve=epochs_without_improvement,
+            metadata=data_fingerprint,
+        )
+        print(f"Full resumable checkpoint saved: Epoch {epoch}")
+        if stop_after_epoch:
+            break
 
     if pynvml is not None:
         try:
