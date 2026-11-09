@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
 from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS, EXPERIMENTS
-from experiment_planner import choose_candidates, plan
+from experiment_planner import choose_candidates, plan, comparison
 
 
 class ExperimentsTests(unittest.TestCase):
@@ -69,6 +69,30 @@ class ExperimentsTests(unittest.TestCase):
                                 dry_run=True, assume_stopped=True, epochs=12, timeout=30)
             self.assertEqual(decision["status"], "selected")
             spawn.assert_not_called()
+
+    def test_comparison_marks_coverage_mae_unavailable(self):
+        import csv
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            fields = ["epoch", "train_loss", "val_loss", "miou_all",
+                      "miou_vegetation", "binary_vegetation_iou",
+                      "learning_rate", "shrub_iou", "cultivated_iou"]
+            pilot = folder / "history.csv"
+            with pilot.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow({
+                    "epoch": 2, "train_loss": .3, "val_loss": .5,
+                    "miou_all": .64, "miou_vegetation": .65,
+                    "binary_vegetation_iou": .85, "learning_rate": 1e-5,
+                    "shrub_iou": .42, "cultivated_iou": .3,
+                })
+            baseline = [{"epoch": 12, "val_loss": .5,
+                         "miou_vegetation": .6326, "shrub_iou": .3}]
+            result = comparison(baseline, folder, "shrub_weight")
+            self.assertTrue(result["available"])
+            self.assertAlmostEqual(result["vegetation_miou_change_pp"], 1.74)
+            self.assertIsNone(result["coverage_mae"])
 
     def test_unsupported_epoch_count_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
