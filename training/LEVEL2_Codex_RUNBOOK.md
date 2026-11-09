@@ -116,3 +116,19 @@ python -m unittest discover -s tests -p test_level2_dashboard.py
 ```
 
 **安全提醒**：不要把本機審核服務修改成 0.0.0.0 或用 ngrok 對外公開，因為它可以核准訓練參數。
+
+## 為什麼 Early Stopping 後沒有待核准提案？（2026-11 修正）
+
+舊版只有「最近四次驗證可能過擬合」或「最近五次 mIoU 波動極小」才會建立 pending JSON。Shrub/Cultivated 低 IoU 本身只會警告；Codex 生成的 `codex_review.md` 也不會直接轉成已批准參數。現在已新增依據 `history.csv` 推算「驗證無改善次數 >= 12，且 Epoch 尚未到 50」的 `early_stop_patience_exceeded` 規則。會提出探索性候選：`scheduler_patience: 4`，**不改極低的現有 LR、不改 LUT**，並清楚說明並無改善保證。此警告是根據 CSV 推算，不表示監控程式能判定訓練進程是否真的已結束。
+
+在 **Level 2 分支** 更新程式並重跑單次監控：
+
+```cmd
+git pull
+python -m unittest discover -s tests -p test_level2.py
+python training\monitor_v5.py --once --codex
+```
+
+網頁仍開著時按「重新整理」，檢查 `outputs_training_v5_level2/approvals/proposal_<ID>.json` 是否出現。若未觸發，開啟 `monitor/status.json` 確認是否有 `early_stop_patience_exceeded`，並檢查監控器是否指向正確 history 路徑。網頁上顯示的 300 / 10080 分鐘剩餘百分比是本機 Codex 上次回報的快照，請看旁邊的更新時間；**頁面刷新不等於 Codex 額度剛更新**。
+
+人工核准只建立 JSON；要在 Epoch 38 的完整狀態上繼續訓練，仍需先核准再**手動**以 `--resume-full`、`--approved-config` 啟動，總 Epoch 上限 50。
