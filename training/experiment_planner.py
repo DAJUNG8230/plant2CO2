@@ -174,6 +174,15 @@ def comparison(baseline_rows, pilot_path, name):
     }
 
 
+def reusable_empty_dir(path):
+    """Allow a retry ONLY for pristine folders left by a pre-launch error.
+
+    Never delete or reuse a directory with a training artifact. Creating the
+    folder itself is harmless; the trainer will refuse overwritten history.
+    """
+    return not path.exists() or (path.is_dir() and not any(path.iterdir()))
+
+
 def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=None):
     if not 1 <= epochs <= 20:
         raise ValueError("Pilot epoch count must be 1..20")
@@ -181,7 +190,8 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=No
     evidence = collect_evidence(rows, baseline)
     candidates = [x for x in choose_candidates(evidence)
                   if x["id"] not in (excluded or set())
-                  and not (output / (x["id"] + "_pilot")).exists()]
+                  and reusable_empty_dir(output / (x["id"] + "_pilot"))
+                  and reusable_empty_dir(output / ("control_for_" + x["id"] + "_pilot"))]
     status_file = output / "monitor" / "experiment_decision.json"
     if not candidates:
         state = {"status": "skipped", "decision": "skip",
@@ -213,10 +223,10 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=No
     # sequential and remain separate; nothing touches baseline checkpoints.
     control_dir = output / ("control_for_" + chosen + "_pilot")
     run_dir = output / (chosen + "_pilot")
-    if run_dir.exists() or control_dir.exists():
-        raise FileExistsError("相同實驗/對照組已存在；拒絕覆寫結果")
+    if not reusable_empty_dir(run_dir) or not reusable_empty_dir(control_dir):
+        raise FileExistsError("已有實際實驗資料，拒絕覆寫；請先確認既有權重與歷史紀錄")
     for dirname in (control_dir, run_dir):
-        dirname.mkdir(parents=True, exist_ok=False)
+        dirname.mkdir(parents=True, exist_ok=True)
 
     def run_template(name, directory):
         command = [
