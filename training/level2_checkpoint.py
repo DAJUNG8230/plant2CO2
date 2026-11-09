@@ -34,15 +34,23 @@ def validate_changes(changes):
     return accepted
 
 
-def read_approved(path):
-    """Only explicitly approved local JSON is eligible for applying at launch."""
+def read_approved(path, allow_autonomous=False):
+    """Accept manual approvals, or explicitly enabled bounded Codex approvals."""
     if not path:
         return {}
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("status") != "approved" or payload.get("approval") != "human-confirmed":
-        raise ValueError("必須先透過人工確認流程核准參數修改")
+    if payload.get("status") != "approved":
+        raise ValueError("未核准的提案不得執行")
     if payload.get("kind", "training_parameters") != "training_parameters":
-        raise ValueError("這是離線評估審核結果，禁止作為 train.py 的參數設定")
+        raise ValueError("離線評估任務不可當作訓練參數")
+    approval = payload.get("approval")
+    if approval == "autonomous-codex-guarded":
+        if not allow_autonomous:
+            raise ValueError("自動核准方案需要明確傳入 --allow-auto-approved")
+        if not isinstance(payload.get("proposal_id"), str) or len(payload["proposal_id"]) != 16:
+            raise ValueError("自動批准檔案缺少提案識別碼")
+    elif approval != "human-confirmed":
+        raise ValueError("無效核准方式")
     return validate_changes(payload.get("changes"))
 
 
