@@ -84,7 +84,7 @@ class ExperimentsTests(unittest.TestCase):
             with patch("experiment_planner.check_baseline", return_value=[{"epoch": 42}]), \
                  patch("experiment_planner.collect_evidence", return_value=self.evidence()), \
                  patch("experiment_planner.choose", return_value={
-                     "decision": "execute", "experiment_id": "shrub_weight",
+                     "decision": "execute", "experiment_id": "shrub_weight_down",
                      "reason": "test only", "risk": "degraded results",
                  }), patch("experiment_planner.subprocess.run") as spawn:
                 decision = plan(root, root / "outputs_training_v5_experiments",
