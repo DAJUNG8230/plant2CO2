@@ -123,6 +123,39 @@ def check_baseline(folder, assume_stopped):
     return rows
 
 
+def comparison(baseline_rows, pilot_path, name):
+    pilot_rows, errors = read_history(pilot_path / "history.csv")
+    if errors:
+        return {"available": False, "reason": "; ".join(errors)}
+    def best(rows):
+        valid = [row for row in rows if row.get("val_loss") is not None
+                 and row.get("miou_vegetation") is not None]
+        return max(valid, key=lambda x: x["miou_vegetation"]) if valid else None
+    first, second = best(baseline_rows), best(pilot_rows)
+    if not first or not second:
+        return {"available": False, "reason": "需要基準和 pilot 都具有有效驗證資料"}
+    class_key = "shrub_iou" if name == "shrub_weight" else "cultivated_iou"
+    baseline_class = first.get(class_key)
+    pilot_class = second.get(class_key)
+    delta = ((second["miou_vegetation"] - first["miou_vegetation"]) * 100)
+    return {
+        "available": True,
+        "definition": "pilot best validation vs baseline best validation; not independent test",
+        "baseline_best_epoch": first["epoch"],
+        "pilot_best_epoch": second["epoch"],
+        "baseline_vegetation_miou": first["miou_vegetation"],
+        "pilot_vegetation_miou": second["miou_vegetation"],
+        "vegetation_miou_change_pp": round(delta, 4),
+        "focus_class": class_key,
+        "baseline_focus_iou": baseline_class,
+        "pilot_focus_iou": pilot_class,
+        "focus_iou_change_pp": (round((pilot_class - baseline_class) * 100, 4)
+                                if baseline_class is not None and pilot_class is not None else None),
+        "coverage_mae": None,
+        "coverage_note": "尚未計算同一固定 GT 圖片的覆蓋率 MAE；此處不聲稱碳匯估算改善。",
+    }
+
+
 def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
     if not 1 <= epochs <= 20:
         raise ValueError("Pilot epoch count must be 1..20")
@@ -172,8 +205,12 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
         save_decision(status_file, {**record, "status": "failed",
                                   "output": str(run_dir), "error": str(exc)[:300]})
         raise
-    state = {**record, "status": "completed", "output": str(run_dir)}
+    result = comparison(rows, run_dir, chosen)
+    save_decision(run_dir / "comparison.json", result)
+    state = {**record, "status": "completed", "output": str(run_dir),
+             "comparison": result}
     save_decision(status_file, state)
+    print("Pilot 最佳結果比較：", json.dumps(result, ensure_ascii=False), flush=True)
     return state
 
 
