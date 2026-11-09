@@ -154,10 +154,10 @@ def process(folder, execute_mode, timeout, require_marker):
     decision_path = folder / "monitor" / "auto_decision.json"
     proposals = candidates_at(folder / "approvals", epoch)
     if not proposals:
-        save_json(decision_path, {"status": "skipped", "decision": "skip",
+        save_json(decision_path, {"status": "awaiting_proposals", "decision": "skip",
                                   "epoch": epoch, "reason": "沒有符合當前 Epoch 的訓練參數提案"})
-        print("沒有可執行訓練提案；離線評估任務不會直接啟動訓練")
-        return
+        print("尚無可執行訓練提案；等待監控器生成。不會執行離線評估任務。")
+        return False
     evidence = collect_evidence(rows, folder)
     d = choose_with_codex(proposals, evidence, timeout)
     match = next((x for x in proposals if x["id"] == d["proposal_id"]), None)
@@ -172,6 +172,7 @@ def process(folder, execute_mode, timeout, require_marker):
                                   "changes": match["changes"]})
     elif match:
         print("預覽完成；只有 --execute 才會真正續訓。")
+    return True
 
 
 def main():
@@ -202,8 +203,10 @@ def main():
             try:
                 rows, epoch = safe_state(args.output, not args.assume_stopped)
                 if epoch not in seen:
-                    seen.add(epoch)
-                    process(args.output, args.execute, args.codex_timeout, not args.assume_stopped)
+                    decided = process(args.output, args.execute, args.codex_timeout,
+                                      not args.assume_stopped)
+                    if decided:
+                        seen.add(epoch)
             except (RuntimeError, FileNotFoundError) as exc:
                 if not args.watch:
                     print("安全檢查未通過：" + str(exc))
