@@ -14,7 +14,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from level2_review import propose_from_status, write_json
+from level2_review import propose_from_status, evidence_review_proposal, write_json
+from level2_evidence import collect_evidence, review_tasks
 
 CLASSES = ["bare_soil", "other_non-veg", "herbaceous", "shrub", "trees", "cultivated"]
 # train.py uses name.lower().replace(" ", "_"): "other_non-veg_iou".
@@ -209,7 +210,7 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def codex_review(report, out_dir, timeout):
+def codex_review(report, evidence, out_dir, timeout):
     binary = shutil.which("codex")
     if not binary:
         return "未找到 Codex CLI，已保留規則式監控報告。"
@@ -221,6 +222,11 @@ def codex_review(report, out_dir, timeout):
         "4. 人工審核清單。不要假設高 IoU 代表真實植被覆蓋正確。"
         "不得要求修改現有 checkpoint、LUT、測試集或正在運行的訓練。"
         "\n\n監控資料 JSON:\n" + json.dumps(report, ensure_ascii=False)
+        + "\n\n完整訓練證據 JSON（含 history、混淆矩陣、最佳 checkpoint metadata 與固定影像評估，缺失則明示）：\n"
+        + json.dumps(evidence, ensure_ascii=False)
+        + "\n\n請優先核對最弱類別的 GT->Pred 混淆方向、最佳/最後驗證差異。"
+          "不要把缺失的固定測試 mask 當成存在；只提出可人工核對的離線實驗，"
+          "不要要求 AI 直接修改標註、模型或測試集。"
     )
     out_path = out_dir / "codex_review.md"
     command = [binary, "exec", "--sandbox", "read-only", "--ephemeral",
@@ -233,23 +239,32 @@ def codex_review(report, out_dir, timeout):
         return f"Codex 分析未完成：{exc}；規則式報告仍可使用。"
 
 
-def run_once(history, output, use_codex, timeout):
+def run_once(history, output, use_codex, timeout, inspect_checkpoint=False, fixed_manifest=None):
     rows, errors = read_history(history)
     report = analyze(rows, gpu_snapshot(), errors)
     output.mkdir(parents=True, exist_ok=True)
     (output / "status.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "report.md").write_text(render_markdown(report), encoding="utf-8")
+    evidence = collect_evidence(rows, history.parent, inspect_checkpoint,
+                                fixed_manifest=fixed_manifest)
+    (output / "evidence.json").write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
     # Suggestions are deterministic and bounded. Never auto-approve or apply.
     proposal = propose_from_status(report)
     if proposal:
         approvals = output.parent / "approvals"
         write_json(approvals / ("proposal_" + proposal["id"] + ".json"), proposal)
         print("待人工審核方案：", approvals / ("proposal_" + proposal["id"] + ".json"))
+    for task in review_tasks(evidence):
+        p = evidence_review_proposal(task, report)
+        approvals = output.parent / "approvals"
+        write_json(approvals / ("proposal_" + p["id"] + ".json"), p)
+        print("待審核離線評估任務：", p["task_code"])
     print(f"Epoch={report['latest_epoch']}，異常={len(report['alerts'])}，"
           f"報告：{output / 'report.md'}")
     if use_codex and report.get("latest_validation"):
-        print(codex_review(report, output, timeout))
+        print(codex_review(report, evidence, output, timeout))
     return report
 
 
@@ -263,6 +278,10 @@ def main():
     parser.add_argument("--codex", action="store_true", help="Run Codex in read-only sandbox")
     parser.add_argument("--interval", type=int, default=120)
     parser.add_argument("--codex-timeout", type=int, default=180)
+    parser.add_argument("--inspect-checkpoint", action="store_true",
+                        help="Read metadata from trusted local best_model.pth with torch")
+    parser.add_argument("--fixed-manifest", type=Path,
+                        help="CSV of precomputed, spatially aligned GT/best/latest masks")
     args = parser.parse_args()
     if args.interval < 10:
         parser.error("--interval 至少需要 10 秒")
@@ -274,7 +293,8 @@ def main():
                                if r.get("val_loss") is not None), None)
             should_review = (args.codex and last_valid is not None
                              and last_valid != last_codex_epoch)
-            run_once(args.history, args.output, should_review, args.codex_timeout)
+            run_once(args.history, args.output, should_review, args.codex_timeout,
+                     args.inspect_checkpoint, args.fixed_manifest)
             if should_review:
                 last_codex_epoch = last_valid
             if not args.watch:
