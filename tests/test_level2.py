@@ -30,6 +30,27 @@ class ApprovalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_changes({"scheduler_patience": 2.5})
 
+    def test_early_stop_generates_reviewable_proposal(self):
+        from monitor_v5 import analyze
+        rows = []
+        for epoch in range(2, 39, 2):
+            metric = 0.6326 if epoch == 12 else (0.428 if epoch == 38 else 0.4)
+            item = {
+                "epoch": epoch, "train_loss": 0.26,
+                "val_loss": 0.59, "miou_vegetation": metric,
+                "learning_rate": 1.875e-6,
+            }
+            for name in ("bare_soil", "other_non-veg", "herbaceous", "shrub", "trees", "cultivated"):
+                item[name + "_iou"] = 0.6
+            rows.append(item)
+        result = analyze(rows, {"available": True, "devices": []}, [])
+        self.assertIn("early_stop_patience_exceeded",
+                      [a["code"] for a in result["alerts"]])
+        proposal = propose_from_status(result)
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal["evidence"], "early_stop_patience_exceeded")
+        self.assertEqual(proposal["changes"], {"scheduler_patience": 4})
+
     def test_propose_approve_then_apply(self):
         status = {"alerts": [{"code": "possible_overfitting"}],
                   "latest_validation": {"epoch": 8, "learning_rate": 3e-5}}
