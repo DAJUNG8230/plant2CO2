@@ -220,9 +220,9 @@ def ensure_budget(args, state, deadline):
 
 def load_or_initialize(args):
     if STATE_PATH.exists():
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if not args.resume_search and state.get("status") != "preview":
             raise RuntimeError("已存在 Level4 搜尋紀錄；加 --resume-search 明確繼續，不可覆寫")
-        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if state.get("status") in ("running", "interrupted"):
             if not args.skip_incomplete:
                 raise RuntimeError("上次實驗尚未完成；請先確認沒有 train.py 執行，再使用 --resume-search --skip-incomplete，舊結果保留")
