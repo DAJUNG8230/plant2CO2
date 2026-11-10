@@ -1115,6 +1115,7 @@ def main():
         "binary_vegetation_precision",
         "binary_vegetation_recall",
         "binary_vegetation_f1",
+        *(["coverage_mae_pp"] if experiment else []),
         "learning_rate",
         "weight_norm",
         "grad_norm",
@@ -1262,6 +1263,7 @@ def main():
             "f1": float("nan"),
         }
         cm = None
+        coverage_mae_pp = float("nan")
 
         if should_validate:
             model.eval()
@@ -1273,6 +1275,8 @@ def main():
             )
 
             valid_val_batches = 0
+            coverage_error_sum = 0.0
+            coverage_valid_images = 0
 
             with torch.no_grad():
                 for images, masks in tqdm(
@@ -1319,6 +1323,19 @@ def main():
                         minlength=NUM_CLASSES * NUM_CLASSES,
                     ).reshape(NUM_CLASSES, NUM_CLASSES)
 
+                    # A real per-image, GT-valid-pixel area error (percentage
+                    # points); do not confuse with signed dataset-wide bias.
+                    valid_per_image = valid.flatten(1).sum(1)
+                    meaningful = valid_per_image > 0
+                    gt_veg = ((masks >= 2) & (masks <= 5) & valid)
+                    pred_veg = ((predictions >= 2) & (predictions <= 5) & valid)
+                    gt_counts = gt_veg.flatten(1).sum(1).float()
+                    pred_counts = pred_veg.flatten(1).sum(1).float()
+                    diff_pp = 100.0 * (pred_counts - gt_counts).abs() / valid_per_image.clamp_min(1)
+                    coverage_error_sum += diff_pp[meaningful].sum().item()
+                    coverage_valid_images += int(meaningful.sum().item())
+
+            coverage_mae_pp = coverage_error_sum / coverage_valid_images if coverage_valid_images else float("nan")
             val_loss /= max(valid_val_batches, 1)
             scheduler.step(val_loss)
 
@@ -1382,6 +1399,7 @@ def main():
                 "Binary vegetation F1: "
                 f"{binary_metrics['f1'] * 100:.2f}%"
             )
+            print(f"Per-image vegetation coverage MAE: {coverage_mae_pp:.3f} percentage points")
         else:
             print("Validation: skipped this epoch")
         current_lr = optimizer.param_groups[0]["lr"]
@@ -1432,6 +1450,7 @@ def main():
                 binary_metrics["precision"],
                 binary_metrics["recall"],
                 binary_metrics["f1"],
+                *([coverage_mae_pp] if experiment else []),
                 current_lr,
                 current_weight_norm,
                 average_grad_norm,
@@ -1467,6 +1486,7 @@ def main():
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
+                        "coverage_mae_pp": coverage_mae_pp,
                     },
                 )
 
