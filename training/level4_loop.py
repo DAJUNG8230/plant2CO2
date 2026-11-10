@@ -336,9 +336,23 @@ def run(args):
                 delta = t["miou_vegetation"] - c["miou_vegetation"]
                 original_delta = t["miou_vegetation"] - state["champion_miou"]
                 binary_delta = t["binary_vegetation_iou"] - state["champion_binary_iou"]
-                # Promote only if better than champion by at least .2 pp,
-                # with binary vegetation IoU not degraded by >.5 pp.
-                promoted = original_delta >= .002 and binary_delta >= -.005
+                # Both members of the matched pair are eligible for champion.
+                # Do not discard a superior unchanged-parameter control model.
+                candidates_for_champion = [
+                    (name, metric, folder)
+                    for name, metric, folder in (
+                        ("control", c, control), ("trial", t, trial)
+                    )
+                    if (metric["miou_vegetation"] - state["champion_miou"] >= .002
+                        and metric["binary_vegetation_iou"] - state["champion_binary_iou"] >= -.005)
+                ]
+                selected_champion = max(
+                    candidates_for_champion,
+                    key=lambda entry: (entry[1]["miou_vegetation"],
+                                       entry[1]["binary_vegetation_iou"]),
+                    default=None,
+                )
+                promoted = selected_champion is not None
                 result = {
                     "index": i, "id": key, "decision": choice,
                     "control_output": str(control), "trial_output": str(trial),
@@ -351,24 +365,29 @@ def run(args):
                     "champion_change_pp": round(original_delta * 100, 4),
                     "previous_champion_binary_iou": state["champion_binary_iou"],
                     "trial_binary_iou": t["binary_vegetation_iou"],
-                    "promoted": promoted, "completed_utc": current_time(),
+                    "promoted": promoted,
+                    "promoted_source": selected_champion[0] if selected_champion else None,
+                    "promoted_miou": selected_champion[1]["miou_vegetation"] if selected_champion else None,
+                    "completed_utc": current_time(),
                     "coverage_mae": None,
                 }
                 save_decision(trial / "level4_comparison.json", result)
                 state["rounds"].append(result)
                 state["attempted"].append(key)
                 if promoted:
-                    state["champion_checkpoint"] = str((trial / "best_model.pth").resolve())
-                    state["champion_miou"] = t["miou_vegetation"]
-                    state["champion_binary_iou"] = t["binary_vegetation_iou"]
+                    source_label, new_best, new_best_dir = selected_champion
+                    state["champion_checkpoint"] = str((new_best_dir / "best_model.pth").resolve())
+                    state["champion_miou"] = new_best["miou_vegetation"]
+                    state["champion_binary_iou"] = new_best["binary_vegetation_iou"]
                     state["stall"] = 0
                 else:
                     state["stall"] += 1
                 state["status"] = "ready"
                 state.pop("active_round", None)
                 save_decision(STATE_PATH, state)
-                print("配對 mIoU 差：%.3f pp；相對目前最佳：%.3f pp；提升保留：%s" %
-                      (delta * 100, original_delta * 100, promoted), flush=True)
+                print("配對 mIoU 差：%.3f pp；試驗組相對前最佳：%.3f pp；是否更新最佳：%s；來源：%s" %
+                      (delta * 100, original_delta * 100, promoted,
+                       selected_champion[0] if selected_champion else "保留原始"), flush=True)
             except (Exception, KeyboardInterrupt) as exc:
                 state["status"] = "interrupted"
                 state["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:500])
