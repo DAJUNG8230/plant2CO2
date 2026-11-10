@@ -285,6 +285,21 @@ def load_pair(image_path, mask_path, augment):
     return image, mask
 
 
+def per_image_vegetation_coverage_errors(predictions, masks, valid):
+    """Absolute GT-valid-pixel vegetation coverage errors, in percentage points.
+
+    Per 512px crop, not native full-image area or carbon stock.
+    """
+    valid_per_image = valid.flatten(1).sum(1)
+    meaningful = valid_per_image > 0
+    gt_veg = ((masks >= 2) & (masks <= 5) & valid)
+    pred_veg = ((predictions >= 2) & (predictions <= 5) & valid)
+    gt_counts = gt_veg.flatten(1).sum(1).float()
+    pred_counts = pred_veg.flatten(1).sum(1).float()
+    diff_pp = 100.0 * (pred_counts - gt_counts).abs() / valid_per_image.clamp_min(1)
+    return diff_pp[meaningful]
+
+
 def masked_dice_loss(logits, targets):
     probs = torch.softmax(logits, dim=1)
     valid = targets != IGNORE_INDEX
@@ -1325,15 +1340,10 @@ def main():
 
                     # A real per-image, GT-valid-pixel area error (percentage
                     # points); do not confuse with signed dataset-wide bias.
-                    valid_per_image = valid.flatten(1).sum(1)
-                    meaningful = valid_per_image > 0
-                    gt_veg = ((masks >= 2) & (masks <= 5) & valid)
-                    pred_veg = ((predictions >= 2) & (predictions <= 5) & valid)
-                    gt_counts = gt_veg.flatten(1).sum(1).float()
-                    pred_counts = pred_veg.flatten(1).sum(1).float()
-                    diff_pp = 100.0 * (pred_counts - gt_counts).abs() / valid_per_image.clamp_min(1)
-                    coverage_error_sum += diff_pp[meaningful].sum().item()
-                    coverage_valid_images += int(meaningful.sum().item())
+                    crop_errors_pp = per_image_vegetation_coverage_errors(
+                        predictions, masks, valid)
+                    coverage_error_sum += crop_errors_pp.sum().item()
+                    coverage_valid_images += crop_errors_pp.numel()
 
             coverage_mae_pp = coverage_error_sum / coverage_valid_images if coverage_valid_images else float("nan")
             val_loss /= max(valid_val_batches, 1)
