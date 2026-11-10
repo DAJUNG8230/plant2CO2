@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from experiment_templates import EXPERIMENTS, BASE_CLASS_WEIGHTS
-from experiment_planner import check_baseline, choose, comparison, save_decision
+from experiment_planner import check_baseline, save_decision
 from level2_evidence import collect_evidence
 from monitor_v5 import read_history, ROOT, gpu_snapshot
 
@@ -180,7 +180,7 @@ def run_training(folder, identifier, source, epochs, seed):
     return assert_train_complete(folder)
 
 
-def ensure_budget(args, state, started, deadline):
+def ensure_budget(args, state, deadline):
     if len(state["rounds"]) >= args.max_rounds:
         return "已達最大實驗輪數"
     if time.monotonic() >= deadline:
@@ -202,11 +202,21 @@ def ensure_budget(args, state, started, deadline):
 
 def load_or_initialize(args):
     if STATE_PATH.exists():
-        if not args.resume_search:
+        if not args.resume_search and state.get("status") != "preview":
             raise RuntimeError("已存在 Level4 搜尋紀錄；加 --resume-search 明確繼續，不可覆寫")
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        if state.get("status") == "running":
-            raise RuntimeError("上次在訓練中中斷；請先人工確認執行緒與檔案，不能直接自動覆寫")
+        if state.get("status") in ("running", "interrupted"):
+            if not args.skip_incomplete:
+                raise RuntimeError("上次實驗尚未完成；請先確認沒有 train.py 執行，再使用 --resume-search --skip-incomplete，舊結果保留")
+            incomplete = state.get("last_decision", {}).get("experiment_id")
+            if not incomplete:
+                raise RuntimeError("找不到上次實驗 ID，拒絕恢復")
+            if incomplete not in state["attempted"]:
+                state["attempted"].append(incomplete)
+            state["stall"] += 1
+            state["status"] = "ready"
+            state["error"] = "Incomplete prior trial preserved; marked attempted (no overwrite)"
+            save_decision(STATE_PATH, state)
         if state.get("status") == "completed":
             raise RuntimeError("搜尋已完成；不允許直接覆寫")
         if not Path(state["champion_checkpoint"]).is_file():
@@ -251,7 +261,7 @@ def run(args):
         if not evidence["best_confusion"]:
             raise RuntimeError("缺少原始最佳 Epoch 混淆矩陣，不啟動無證據實驗")
         while True:
-            stop = ensure_budget(args, state, args, deadline)
+            stop = ensure_budget(args, state, deadline)
             if stop:
                 state["status"] = "stopped"
                 state["stop_reason"] = stop
@@ -348,6 +358,8 @@ def main():
     p.add_argument("--execute", action="store_true", help="Opt in to autonomous training")
     p.add_argument("--assume-baseline-stopped", action="store_true")
     p.add_argument("--resume-search", action="store_true")
+    p.add_argument("--skip-incomplete", action="store_true",
+                   help="Mark a previously interrupted trial attempted; never reuse outputs")
     p.add_argument("--baseline", type=Path, default=BASELINE)
     p.add_argument("--max-rounds", type=int, default=12)
     p.add_argument("--max-hours", type=float, default=24)
@@ -360,6 +372,8 @@ def main():
     p.add_argument("--codex-timeout", type=int, default=600)
     p.add_argument("--min-free-gb", type=float, default=15)
     args = p.parse_args()
+    if args.skip_incomplete and (not args.resume_search or not args.assume_baseline_stopped):
+        p.error("--skip-incomplete requires --resume-search and explicit --assume-baseline-stopped")
     state = run(args)
     print("最終狀態：" + state["status"])
     print("目前保留的最佳權重：" + state["champion_checkpoint"])
