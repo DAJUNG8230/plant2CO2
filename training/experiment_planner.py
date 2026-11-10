@@ -49,7 +49,7 @@ def choose(evidence, candidates, timeout):
         "只允許從 candidates 選一個現有 id，或 skip；不可以編造參數、命令、模型權重。"
         "重視植被面積誤差與植被四類 mIoU。"
         "如果缺少類別混淆證據、沒有合理假設或只能造成無意義訓練，選 skip。"
-        "候選只修改單一類別 CrossEntropy 權重，測試為探索性，"
+        "候選依 GT/Pred 面積偏差方向只調整一個類別 CrossEntropy 權重，有相同起點未改權重的對照組；試驗仍是探索性，"
         "不能聲稱必定超越既有最佳成績。"
         "只輸出單一合法 JSON 物件，欄位 decision 為 execute 或 skip、"
         "experiment_id 為候選 id 或 null、reason 為繁體中文原因、risk 為風險。"
@@ -87,23 +87,41 @@ def choose(evidence, candidates, timeout):
 
 
 def choose_candidates(evidence):
-    matrix = evidence.get("best_confusion") or evidence.get("latest_confusion")
+    """Generate candidates only when GT/Pred direction in best-epoch confusion
+    supports a class-weight change; do not infer this from IoU alone."""
+    matrix = evidence.get("best_confusion")
     if not matrix:
         return []
     result = []
-    for identifier, name in (("shrub_weight", "Shrub"), ("cultivated_weight", "Cultivated")):
+    specs = (("Shrub", "shrub_weight", "shrub_weight_down"),
+             ("Cultivated", "cultivated_weight", "cultivated_weight_down"))
+    for name, increase_id, decrease_id in specs:
         item = next((x for x in matrix["classes"] if x["class"] == name), None)
-        if item and item.get("iou") is not None and item["iou"] < .55:
-            t = EXPERIMENTS[identifier]
-            result.append({
-                "id": identifier, "changed_class": name,
-                "class_iou": item["iou"],
-                "top_misclassifications": item["top_misclassifications"],
-                "weights_before": [1.20, .80, 1.25, 1.45, 1.00, .90],
-                "weights_after": t["class_weights"],
-                "hypothesis": t["hypothesis"],
-                "risk": t["risk"],
-            })
+        if not item or item.get("iou") is None or item["iou"] >= .55:
+            continue
+        gt, pred = item.get("gt_pixels"), item.get("predicted_pixels")
+        if not isinstance(gt, int) or not isinstance(pred, int) or gt < 100 or pred < 0:
+            continue
+        # >= 10% signed area imbalance is only a screening heuristic;
+        # it does NOT prove the class weight is causal or optimal.
+        if pred >= gt * 1.10:
+            identifier, direction = decrease_id, "overpredicted"
+        elif pred <= gt * .90:
+            identifier, direction = increase_id, "underpredicted"
+        else:
+            continue
+        template = EXPERIMENTS[identifier]
+        result.append({
+            "id": identifier, "changed_class": name,
+            "class_iou": item["iou"], "gt_pixels": gt, "predicted_pixels": pred,
+            "pred_to_gt_ratio": round(pred / gt, 5),
+            "direction": direction,
+            "top_misclassifications": item["top_misclassifications"],
+            "weights_before": EXPERIMENTS["baseline_control"]["class_weights"],
+            "weights_after": template["class_weights"],
+            "hypothesis": template["hypothesis"], "risk": template["risk"],
+            "interpretation": "Candidate hypothesis, not demonstrated causal benefit.",
+        })
     return result
 
 
@@ -134,7 +152,7 @@ def comparison(baseline_rows, pilot_path, name):
     first, second = best(baseline_rows), best(pilot_rows)
     if not first or not second:
         return {"available": False, "reason": "需要基準和 pilot 都具有有效驗證資料"}
-    class_key = "shrub_iou" if name == "shrub_weight" else "cultivated_iou"
+    class_key = "shrub_iou" if name.startswith("shrub_weight") else "cultivated_iou"
     baseline_class = first.get(class_key)
     pilot_class = second.get(class_key)
     delta = ((second["miou_vegetation"] - first["miou_vegetation"]) * 100)
@@ -156,12 +174,77 @@ def comparison(baseline_rows, pilot_path, name):
     }
 
 
-def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
+def reusable_empty_dir(path):
+    """Allow a retry ONLY for pristine folders left by a pre-launch error.
+
+    Never delete or reuse a directory with a training artifact. Creating the
+    folder itself is harmless; the trainer will refuse overwritten history.
+    """
+    return not path.exists() or (path.is_dir() and not any(path.iterdir()))
+
+
+def archive_failed_preflight(output):
+    """Explicit recovery for folders left before a single training epoch completed.
+
+    Only handles directories recorded in the most recent failed planner run.
+    Moves existing content into failed_runs; never deletes user artifacts.
+    """
+    status = output / "monitor" / "experiment_decision.json"
+    if not status.is_file():
+        raise RuntimeError("沒有上次失敗紀錄，拒絕自動搬移")
+    record = json.loads(status.read_text(encoding="utf-8"))
+    if record.get("status") != "failed" or not record.get("experiment_id"):
+        raise RuntimeError("只有失敗的實驗才允許恢復目錄")
+    identifier = record["experiment_id"]
+    if identifier not in EXPERIMENTS or identifier == "baseline_control":
+        raise RuntimeError("不允許的舊實驗代號")
+    expected = [
+        output / ("control_for_" + identifier + "_pilot"),
+        output / (identifier + "_pilot"),
+    ]
+    paths = [Path(record.get("control_output", "")), Path(record.get("output", ""))]
+    if any(p.resolve() != e.resolve() for p, e in zip(paths, expected)):
+        raise RuntimeError("失敗紀錄中的路徑不符，拒絕自動搬移")
+    for folder in expected:
+        if not folder.exists():
+            continue
+        if not folder.is_dir():
+            raise RuntimeError("無法恢復：路徑不是資料夾")
+        if (folder / "latest_state.pth").exists() or (folder / "best_model.pth").exists():
+            raise RuntimeError("資料夾包含已訓練的權重，需人工檢查；不自動搬移")
+        rows, errors = read_history(folder / "history.csv")
+        if rows:
+            raise RuntimeError("資料夾包含已完成 Epoch，需人工檢查；不自動搬移")
+        if errors and (folder / "history.csv").is_file():
+            # An empty/header-only history.csv is expected after failure.
+            try:
+                with (folder / "history.csv").open(encoding="utf-8-sig") as stream:
+                    if len(stream.readlines()) > 1:
+                        raise RuntimeError("存在非空訓練記錄，需人工檢查")
+            except UnicodeError as exc:
+                raise RuntimeError("無法安全解讀 history.csv") from exc
+    archive_root = output / "failed_runs"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    for folder in expected:
+        if folder.exists():
+            destination = archive_root / (folder.name + "_" + stamp)
+            folder.rename(destination)
+            print("已保留未完成資料至：" + str(destination), flush=True)
+    record["status"] = "archived_failed_preflight"
+    save_decision(status, record)
+
+
+def plan(baseline, output, dry_run, assume_stopped, epochs, timeout, excluded=None):
     if not 1 <= epochs <= 20:
         raise ValueError("Pilot epoch count must be 1..20")
     rows = check_baseline(baseline, assume_stopped)
     evidence = collect_evidence(rows, baseline)
-    candidates = choose_candidates(evidence)
+    candidates = [x for x in choose_candidates(evidence)
+                  if x["id"] not in (excluded or set())
+                  and reusable_empty_dir(output / (x["id"] + "_pilot"))
+                  and reusable_empty_dir(output / ("control_for_" + x["id"] + "_pilot"))]
     status_file = output / "monitor" / "experiment_decision.json"
     if not candidates:
         state = {"status": "skipped", "decision": "skip",
@@ -171,6 +254,8 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
         return state
     decision = choose(evidence, candidates, timeout)
     chosen = decision["experiment_id"]
+    if chosen is not None and chosen not in {item["id"] for item in candidates}:
+        raise ValueError("Codex decision contains non-candidate experiment ID")
     record = {
         **decision, "status": "selected" if chosen else "skipped",
         "base_epoch": rows[-1]["epoch"],
@@ -186,31 +271,59 @@ def plan(baseline, output, dry_run, assume_stopped, epochs, timeout):
     if not chosen or dry_run:
         print("此為預覽模式；沒有啟動 GPU 訓練。" if chosen else "Codex 選擇跳過新實驗。")
         return record
-    # Fixed command constructed by this program; no model generated shell input.
+    # A matched unchanged-weight control is mandatory: same starting model,
+    # random seed, train/val data and number of epochs. Experiments are
+    # sequential and remain separate; nothing touches baseline checkpoints.
+    control_dir = output / ("control_for_" + chosen + "_pilot")
     run_dir = output / (chosen + "_pilot")
-    if run_dir.exists():
-        raise FileExistsError("已存在同名實驗目錄；為保護實驗結果，拒絕覆寫：" + str(run_dir))
-    run_dir.mkdir(parents=True)
-    command = [
-        sys.executable, "training/train.py",
-        "--experiment-id", chosen,
-        "--experiment-output", str(run_dir.resolve()),
-        "--init-from-best", str((baseline / "best_model.pth").resolve()),
-        "--max-epochs", str(epochs),
-    ]
-    save_decision(status_file, {**record, "status": "running", "output": str(run_dir)})
-    try:
+    if not reusable_empty_dir(run_dir) or not reusable_empty_dir(control_dir):
+        raise FileExistsError("已有實際實驗資料，拒絕覆寫；請先確認既有權重與歷史紀錄")
+    for dirname in (control_dir, run_dir):
+        dirname.mkdir(parents=True, exist_ok=True)
+
+    def run_template(name, directory):
+        command = [
+            sys.executable, "training/train.py",
+            "--experiment-id", name,
+            "--experiment-output", str(directory.resolve()),
+            "--init-from-best", str((baseline / "best_model.pth").resolve()),
+            "--experiment-seed", "42",
+            "--max-epochs", str(epochs),
+        ]
         subprocess.run(command, cwd=ROOT, check=True)
+        marker = directory / "training_finished.json"
+        if not marker.is_file():
+            raise RuntimeError("訓練程序沒有正常完成標記，拒絕執行下一個 GPU 實驗")
+        completed = json.loads(marker.read_text(encoding="utf-8"))
+        if completed.get("reason") != "normal_training_loop_exit":
+            raise RuntimeError("訓練非正常完成：" + str(completed.get("reason")))
+        rows_after, errors_after = read_history(directory / "history.csv")
+        if errors_after or not any(row.get("val_loss") is not None for row in rows_after):
+            raise RuntimeError("缺少有效驗證紀錄，拒絕繼續搜尋")
+
+    save_decision(status_file, {**record, "status": "running_control",
+                                "control_output": str(control_dir), "output": str(run_dir)})
+    try:
+        print("先訓練同起點的未調權重對照組：" + str(control_dir), flush=True)
+        run_template("baseline_control", control_dir)
+        save_decision(status_file, {**record, "status": "running_pilot",
+                                    "control_output": str(control_dir), "output": str(run_dir)})
+        print("再訓練 Codex 選出的單變因組：" + str(run_dir), flush=True)
+        run_template(chosen, run_dir)
     except (Exception, KeyboardInterrupt) as exc:
         save_decision(status_file, {**record, "status": "failed",
+                                  "control_output": str(control_dir),
                                   "output": str(run_dir), "error": str(exc)[:300]})
         raise
-    result = comparison(rows, run_dir, chosen)
+    result = comparison(read_history(control_dir / "history.csv")[0], run_dir, chosen)
+    result["reference"] = "matched unchanged-class-weight control, both warm-started from baseline best"
+    result["original_baseline_best_miou"] = evidence["history"]["best_vegetation_miou"]
+    result["control_output"] = str(control_dir)
     save_decision(run_dir / "comparison.json", result)
     state = {**record, "status": "completed", "output": str(run_dir),
-             "comparison": result}
+             "control_output": str(control_dir), "comparison": result}
     save_decision(status_file, state)
-    print("Pilot 最佳結果比較：", json.dumps(result, ensure_ascii=False), flush=True)
+    print("Pilot 與相同起點對照組的比較：", json.dumps(result, ensure_ascii=False), flush=True)
     return state
 
 
@@ -221,7 +334,11 @@ def main():
                    help="For old baseline without finished marker; verify no training is running")
     p.add_argument("--baseline", type=Path, default=BASELINE)
     p.add_argument("--output", type=Path, default=PILOTS)
-    p.add_argument("--pilot-epochs", type=int, default=12)
+    p.add_argument("--recover-failed", action="store_true",
+                   help="Archive only failed pre-epoch folders without weights; never delete")
+    p.add_argument("--pilot-epochs", type=int, default=8)
+    p.add_argument("--max-trials", type=int, default=1, choices=(1, 2),
+                   help="Max independent pilot/control pairs; stop on non-improvement")
     p.add_argument("--codex-timeout", type=int, default=180)
     args = p.parse_args()
     if args.output.resolve() != PILOTS.resolve():
@@ -234,8 +351,34 @@ def main():
     except FileExistsError:
         p.error("Another experiment planner may already be running")
     try:
-        plan(args.baseline, args.output, not args.execute, args.assume_baseline_stopped,
-             args.pilot_epochs, args.codex_timeout)
+        if args.recover_failed:
+            archive_failed_preflight(args.output)
+        tried = set()
+        outcomes = []
+        for trial in range(args.max_trials):
+            result = plan(args.baseline, args.output, not args.execute,
+                          args.assume_baseline_stopped, args.pilot_epochs,
+                          args.codex_timeout, excluded=tried)
+            outcomes.append(result)
+            if not args.execute or result.get("status") != "completed":
+                break
+            selected = result.get("experiment_id")
+            if selected:
+                tried.add(selected)
+            metrics = result.get("comparison", {})
+            delta = metrics.get("vegetation_miou_change_pp")
+            target_delta = metrics.get("focus_iou_change_pp")
+            # Conservative gating: both overall vegetation and target class
+            # must beat their same-seed unchanged-weight control.
+            if (not metrics.get("available") or delta is None or target_delta is None
+                    or delta <= 0 or target_delta <= 0):
+                print("沒有同時改善植被 mIoU 與目標類 IoU，停止後續自動搜尋。")
+                break
+        save_decision(args.output / "monitor" / "search_summary.json", {
+            "trials": outcomes, "completed_trials": len(outcomes),
+            "max_trials": args.max_trials,
+            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        })
     finally:
         lock.unlink(missing_ok=True)
 

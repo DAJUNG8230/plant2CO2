@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from level2_checkpoint import save_full, restore_full, read_approved, apply_approved, save_best_protected
-from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS
+from experiment_templates import get_experiment, BASE_CLASS_WEIGHTS, EXPERIMENTS
 
 import numpy as np
 from PIL import Image
@@ -309,8 +309,11 @@ def masked_dice_loss(logits, targets):
         denominator + 1e-6
     )
 
+    # Dice weighting is fixed across all Level 3 pilot/control runs.
+    # The one allowed experiment variable is the CrossEntropy class weight
+    # configured in main(). Never reference main()-local experiment here.
     class_weights = torch.tensor(
-        experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
+        BASE_CLASS_WEIGHTS,
         device=logits.device,
         dtype=dice.dtype,
     )
@@ -863,8 +866,9 @@ def main():
     parser.add_argument("--allow-auto-approved", action="store_true",
                         help="Explicit opt-in to bounded autonomous Codex proposal")
     parser.add_argument("--max-epochs", type=int, default=EPOCHS)
-    parser.add_argument("--experiment-id", choices=("shrub_weight", "cultivated_weight"),
+    parser.add_argument("--experiment-id", choices=tuple(EXPERIMENTS),
                         help="Whitelisted single-variable experiment, isolated output only")
+    parser.add_argument("--experiment-seed", type=int, default=42)
     parser.add_argument("--experiment-output", type=Path,
                         help="Unique output path under outputs_training_v5_experiments")
     parser.add_argument("--init-from-best", type=Path,
@@ -872,6 +876,15 @@ def main():
     args = parser.parse_args()
     experiment = get_experiment(args.experiment_id) if args.experiment_id else None
     if experiment:
+        if not 0 <= args.experiment_seed <= 2147483647:
+            parser.error("Experiment seed out of range")
+        # Each paired run reinitializes Python / NumPy / torch RNG identically.
+        # CUDA kernels and worker prefetch may remain nondeterministic.
+        random.seed(args.experiment_seed)
+        np.random.seed(args.experiment_seed)
+        torch.manual_seed(args.experiment_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.experiment_seed)
         if args.resume_full or args.approved_config:
             parser.error("Experiment mode cannot resume or apply unrelated approval")
         if not args.experiment_output or not args.init_from_best:
@@ -1043,6 +1056,7 @@ def main():
         "encoder": "resnet50",
         "mapping": "v5_unet_stage3_flair_lut_aligned",
         "experiment_id": args.experiment_id or "baseline",
+        "experiment_seed": args.experiment_seed if experiment else None,
         "class_weights": experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
     }
 
@@ -1504,7 +1518,7 @@ def main():
         "last_epoch": completed_epoch,
         "max_epochs": args.max_epochs,
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-        "reason": "normal_training_loop_exit",
+        "reason": "gpu_temperature_limit" if stop_for_temperature else "normal_training_loop_exit",
     }
     marker_temp = finished_marker.with_suffix(".tmp")
     marker_temp.write_text(json.dumps(marker_data, ensure_ascii=False), encoding="utf-8")

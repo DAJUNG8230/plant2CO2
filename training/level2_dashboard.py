@@ -64,6 +64,7 @@ button:disabled{background:#566375;cursor:default}
 <div class="metric">Pilot Epoch 上限<strong id="pilotepochs">—</strong></div>
 </div>
 <p id="pilotreason" style="white-space:pre-wrap"></p>
+<p id="pilotcomparison" class="hint">尚無成對實驗比較。</p>
 <p id="pilotrisk" class="hint"></p>
 <p class="hint">此面板只顯示控制器決策。新實驗在獨立資料夾執行，不佔用主網站 app.py 連接埠。</p>
 </section>
@@ -131,6 +132,10 @@ text("pilotid",pilot.experiment_id||"未選擇");
 text("pilotepochs",pilot.pilot_epochs);
 text("pilotreason","Codex 理由："+(pilot.reason||"尚無決策"));
 text("pilotrisk","實驗風險："+(pilot.risk||"—"));
+const paired=pilot.comparison||{};
+text("pilotcomparison",paired.available?
+"配對對照組：植被 mIoU 差 "+paired.vegetation_miou_change_pp+" pp，目標類 IoU 差 "+paired.focus_iou_change_pp+" pp；未計算獨立測試圖 MAE":
+"尚無成對實驗結果；只有實驗完成後才能比較。");
 const auto=d.auto_decision||{};
 text("autostatus",auto.status||"未啟動");
 text("autopid",auto.proposal_id||"未選擇");
@@ -306,7 +311,7 @@ def experiment_decision_state():
         path = ROOT / "outputs_training_v5_experiments" / "monitor" / "experiment_decision.json"
         decision = json.loads(path.read_text(encoding="utf-8"))
         return {key: decision.get(key) for key in
-                ("status", "decision", "experiment_id", "reason", "risk", "pilot_epochs", "output")}
+                ("status", "decision", "experiment_id", "reason", "risk", "pilot_epochs", "output", "comparison")}
     except (OSError, ValueError):
         return {}
 
