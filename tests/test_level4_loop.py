@@ -52,12 +52,14 @@ class Level4Tests(unittest.TestCase):
             args = SimpleNamespace(max_rounds=12, max_stall=5,
                                    target_miou=.80, min_free_gb=5)
             state = {"rounds": [], "stall": 0, "champion_miou": .63}
-            with patch.object(l4, "OUTPUT", folder), patch.object(l4, "gpu_snapshot", return_value={
+            with patch.object(l4, "OUTPUT", folder), patch.object(l4.shutil, "disk_usage",
+                         return_value=SimpleNamespace(free=100 * (1024 ** 3))), patch.object(l4, "gpu_snapshot", return_value={
                 "devices": [{"temperature_c": 82}]
             }):
                 self.assertIn("GPU", l4.ensure_budget(args, state, float("inf")))
             state["stall"] = 5
-            with patch.object(l4, "OUTPUT", folder):
+            with patch.object(l4, "OUTPUT", folder), patch.object(l4.shutil, "disk_usage",
+                         return_value=SimpleNamespace(free=100 * (1024 ** 3))):
                 self.assertIn("未改善", l4.ensure_budget(args, state, float("inf")))
 
     def test_resume_preview_and_reject_incomplete_without_optin(self):
