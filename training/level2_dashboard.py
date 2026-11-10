@@ -62,6 +62,7 @@ button:disabled{background:#566375;cursor:default}
 <div class="metric">狀態<strong id="level4status">—</strong></div>
 <div class="metric">完成輪數<strong id="level4rounds">—</strong></div>
 <div class="metric">目前最佳植被 mIoU<strong id="level4miou">—</strong></div>
+<div class="metric">最佳模型逐圖覆蓋率 MAE<strong id="level4mae">—</strong></div>
 </div>
 <p id="level4choice"></p>
 <p id="level4reason" style="white-space:pre-wrap"></p>
@@ -141,6 +142,7 @@ const l4=d.level4||{};
 text("level4status",l4.status||"未啟動");
 text("level4rounds",l4.round_count??0);
 text("level4miou",l4.champion_miou!=null?(l4.champion_miou*100).toFixed(2)+"%":"—");
+text("level4mae",l4.champion_coverage_mae_pp!=null?l4.champion_coverage_mae_pp.toFixed(3)+" pp":"原始模型尚無資料");
 text("level4choice","最近選擇："+(l4.last_decision?.experiment_id||"尚無"));
 text("level4reason","決策理由："+(l4.last_decision?.reason||"尚無"));
 text("level4progress",l4.last_round?
@@ -345,6 +347,7 @@ def level4_state():
             "status": state.get("status"),
             "round_count": len(rounds),
             "champion_miou": state.get("champion_miou"),
+            "champion_coverage_mae_pp": state.get("champion_coverage_mae_pp"),
             "champion_checkpoint": state.get("champion_checkpoint"),
             "stop_reason": state.get("stop_reason"),
             "last_decision": state.get("last_decision"),
