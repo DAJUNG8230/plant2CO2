@@ -1020,7 +1020,7 @@ def main():
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=LEARNING_RATE,
+        lr=experiment.get("learning_rate", LEARNING_RATE) if experiment else LEARNING_RATE,
         weight_decay=1e-4,
     )
 
@@ -1056,6 +1056,7 @@ def main():
         "encoder": "resnet50",
         "mapping": "v5_unet_stage3_flair_lut_aligned",
         "experiment_id": args.experiment_id or "baseline",
+        "experiment_learning_rate": experiment.get("learning_rate", LEARNING_RATE) if experiment else LEARNING_RATE,
         "experiment_seed": args.experiment_seed if experiment else None,
         "class_weights": experiment["class_weights"] if experiment else BASE_CLASS_WEIGHTS,
     }
