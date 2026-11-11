@@ -40,12 +40,16 @@ class WebDesignContractTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", HTML)
         self.assertIn('type="range"', HTML)
 
-    def test_design_palette_avoids_generic_gradiated_ui(self):
-        self.assertIn("--bg:#101b18", HTML)
-        self.assertIn("--lime:#c2d58e", HTML)
-        self.assertIn("Fraunces", HTML)
+    def test_botanical_editorial_design_palette_and_fonts(self):
+        self.assertIn("--bg:#eceae0", HTML)
+        self.assertIn("--lime:#376b46", HTML)
+        self.assertIn("Cormorant Garamond", HTML)
         self.assertIn("DM Mono", HTML)
-        self.assertNotIn("linear-gradient(135deg,#", HTML)
+        self.assertIn("植被提取技術與", HTML)
+        self.assertIn("影像來源分析", HTML)
+        self.assertIn("建立碳匯系統", HTML)
+        self.assertIn("study-leaf", HTML)
+        self.assertNotIn("content=\"#101b18\"", HTML)
 
 
 if __name__ == "__main__":
