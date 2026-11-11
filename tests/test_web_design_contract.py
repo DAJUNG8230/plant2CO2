@@ -45,7 +45,9 @@ class WebDesignContractTests(unittest.TestCase):
         self.assertIn("--lime:#376b46", HTML)
         self.assertIn("Cormorant Garamond", HTML)
         self.assertIn("DM Mono", HTML)
-        self.assertIn("Nature, in", HTML)
+        self.assertIn("植被提取技術與", HTML)
+        self.assertIn("影像來源分析", HTML)
+        self.assertIn("建立碳匯系統", HTML)
         self.assertIn("study-leaf", HTML)
         self.assertNotIn("content=\"#101b18\"", HTML)
 
