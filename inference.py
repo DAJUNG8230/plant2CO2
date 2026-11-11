@@ -1,7 +1,8 @@
 from pathlib import Path
+import json
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 import torch
 import torch.nn.functional as F
@@ -60,6 +61,7 @@ MODEL_CONFIG = {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
         "paths": [
+            MODELS_DIR / "segformer_best_v3",
             MODELS_DIR / "best_model_segformer",
             MODELS_DIR / "segformer_best",
             MODELS_DIR / "segformer_best.pth",
@@ -122,7 +124,77 @@ def _build_smp_model(model_name, encoder, num_classes):
     raise ValueError(f"未知 SMP 模型：{model_name}")
 
 
+def _load_segformer_v3(model_path):
+    """Load the teammate's six-class SegFormer-B0 v3 checkpoint strictly.
+
+    v3 uses Transformers 5.x stage naming and a manually defined
+    resize-with-aspect / centered black-pad pipeline.
+    """
+    from transformers import SegformerConfig, SegformerForSemanticSegmentation
+
+    info_path = model_path / "deployment_info.json"
+    checkpoint_path = model_path / "segformer_best_v3.pth"
+    if not info_path.is_file() or not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            "SegFormer v3 需要 config.json、deployment_info.json 和 "
+            "segformer_best_v3.pth，請勿混用舊 11 類 model.safetensors。"
+        )
+
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    expected_labels = [
+        "Bare Soil", "Other Non-Vegetation", "Herbaceous Vegetation",
+        "Brushwood", "Trees", "Cultivated Vegetation",
+    ]
+    if (info.get("model_name") != "SegFormer-B0"
+            or info.get("num_classes") != NUM_CLASSES
+            or info.get("class_names") != expected_labels
+            or info.get("vegetation_class_ids") != VEGETATION_CLASS_IDS
+            or info.get("input_size") != 512
+            or info.get("resize_method") != "keep_aspect_ratio"
+            or info.get("padding") != "center_black"):
+        raise ValueError("SegFormer v3 部署設定與網站約定的六類或前處理不一致")
+
+    config = SegformerConfig.from_pretrained(str(model_path), local_files_only=True)
+    if (int(config.num_labels) != NUM_CLASSES or
+            [config.id2label.get(i) for i in range(NUM_CLASSES)] != expected_labels):
+        raise ValueError("SegFormer v3 config.json 的類別數量或順序與權重不相容")
+
+    model = SegformerForSemanticSegmentation(config)
+    try:
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            raise ValueError("權重不是 state_dict")
+        model.load_state_dict(state, strict=True)
+    except (RuntimeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            "SegFormer v3 無法以 strict=True 載入六類權重；請核對 transformers 版本"
+            "（組員環境為 5.22.0）與 segformer_best_v3.pth。"
+            f" 原始錯誤：{exc}"
+        ) from exc
+
+    mean = np.asarray(info["mean"], dtype=np.float32)
+    std = np.asarray(info["std"], dtype=np.float32)
+    if mean.shape != (3,) or std.shape != (3,) or np.any(std <= 0):
+        raise ValueError("SegFormer v3 的 mean/std 不合法")
+    _PROCESSORS["segformer"] = {
+        "mode": "teammate_v3", "size": 512, "mean": mean, "std": std,
+    }
+    _MODEL_META["segformer"] = {
+        "encoder": "SegFormer-B0 v3",
+        "num_classes": NUM_CLASSES,
+        "image_size": 512,
+        "best_miou": None,
+        "checkpoint_path": str(checkpoint_path),
+        "id2label": {i: name for i, name in enumerate(expected_labels)},
+    }
+    model.to(DEVICE)
+    model.eval()
+    return model
+
+
 def _load_segformer(model_path):
+    if (model_path / "segformer_best_v3.pth").is_file():
+        return _load_segformer_v3(model_path)
     try:
         from transformers import (
             SegformerForSemanticSegmentation,
@@ -337,22 +409,45 @@ def _prepare_tensor(rgb, image_size):
 def _predict_segformer(rgb):
     model = load_model("segformer")
     processor = _PROCESSORS["segformer"]
-    inputs = processor(
-        images=Image.fromarray(rgb),
-        return_tensors="pt",
-    )
-    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-
-    with torch.inference_mode():
-        outputs = model(**inputs)
-        logits = F.interpolate(
-            outputs.logits,
-            size=rgb.shape[:2],
-            mode="bilinear",
-            align_corners=False,
+    if isinstance(processor, dict) and processor.get("mode") == "teammate_v3":
+        # Match the training team's inference.py exactly: preserve aspect,
+        # black-pad to 512, normalize, remove padding, resize IDs with NEAREST.
+        h, w = rgb.shape[:2]
+        size = processor["size"]
+        scale = size / max(w, h)
+        new_w, new_h = round(w * scale), round(h * scale)
+        resized = Image.fromarray(rgb).resize(
+            (new_w, new_h), Image.Resampling.BILINEAR)
+        left, top = (size - new_w) // 2, (size - new_h) // 2
+        padded = ImageOps.expand(
+            resized,
+            (left, top, size - new_w - left, size - new_h - top),
+            fill=0,
         )
-        mask = torch.argmax(logits, dim=1)[0]
+        array = np.asarray(padded, dtype=np.float32) / 255.0
+        array = (array - processor["mean"]) / processor["std"]
+        tensor = torch.from_numpy(
+            np.transpose(array, (2, 0, 1)).copy()
+        ).unsqueeze(0).to(DEVICE)
+        with torch.inference_mode():
+            logits = model(pixel_values=tensor).logits
+            logits = F.interpolate(
+                logits, size=(size, size), mode="bilinear",
+                align_corners=False)
+            mask_ids = logits.argmax(dim=1)[0].cpu().numpy().astype(np.uint8)
+        cropped = mask_ids[top:top + new_h, left:left + new_w]
+        restored = Image.fromarray(cropped).resize(
+            (w, h), Image.Resampling.NEAREST)
+        return np.asarray(restored, dtype=np.uint8)
 
+    inputs = processor(images=Image.fromarray(rgb), return_tensors="pt")
+    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+    with torch.inference_mode():
+        logits = model(**inputs).logits
+        logits = F.interpolate(
+            logits, size=rgb.shape[:2], mode="bilinear",
+            align_corners=False)
+        mask = torch.argmax(logits, dim=1)[0]
     return mask.cpu().numpy().astype(np.uint8)
 
 
