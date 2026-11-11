@@ -161,10 +161,22 @@ def _load_segformer(model_path):
         str(model_path),
         local_files_only=True,
     )
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        str(model_path),
-        local_files_only=True,
-    )
+    try:
+        model = SegformerForSemanticSegmentation.from_pretrained(
+            str(model_path),
+            local_files_only=True,
+            # Never silently reinitialize an incompatible 6-class head.
+            ignore_mismatched_sizes=False,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ValueError(
+            "SegFormer 權重與 config.json 的形狀不一致，無法安全載入。"
+            "請先執行 python training/diagnose_segformer.py "
+            "檢查 config 的 num_labels、hidden_sizes 和 classifier 權重。"
+            "不能直接設定 ignore_mismatched_sizes=True，"
+            "否則不相容的分類層可能被隨機初始化。"
+            f"\n模型資料夾：{model_path}\n原始錯誤：{exc}"
+        ) from exc
 
     if int(model.config.num_labels) != NUM_CLASSES:
         raise ValueError(
