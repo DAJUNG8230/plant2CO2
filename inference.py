@@ -54,7 +54,7 @@ MODEL_CONFIG = {
     "pspnet": {
         "display_name": "PSPNet",
         "default_encoder": "resnet50",
-        "paths": [MODELS_DIR / "pspnet_resnet50_6class.pth"],
+        "paths": [MODELS_DIR / "best_pnet.pth"],
     },
     "segformer": {
         "display_name": "SegFormer",
