@@ -26,6 +26,27 @@ class TrainLossAndRecoveryTests(unittest.TestCase):
         loss.backward()
         self.assertTrue(torch.isfinite(outputs.grad).all().item())
 
+    def test_per_crop_vegetation_coverage_absolute_errors(self):
+        import torch
+        spec = importlib.util.spec_from_file_location("deeplab_v5_coverage", ROOT / "training" / "train.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        gt = torch.tensor([
+            [[2, 3], [0, 255]],
+            [[0, 0], [5, 5]],
+        ], dtype=torch.long)
+        pred = torch.tensor([
+            [[2, 0], [0, 5]],
+            [[0, 2], [5, 5]],
+        ], dtype=torch.long)
+        result = module.per_image_vegetation_coverage_errors(pred, gt, gt != 255)
+        self.assertEqual(result.numel(), 2)
+        self.assertAlmostEqual(result[0].item(), 100 / 3, places=4)
+        self.assertAlmostEqual(result[1].item(), 25.0, places=4)
+        ignored = torch.full_like(gt, 255)
+        self.assertEqual(module.per_image_vegetation_coverage_errors(pred, ignored,
+                         ignored != 255).numel(), 0)
+
     def test_recover_failed_pre_epoch_archives_without_deleting(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

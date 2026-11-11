@@ -29,7 +29,7 @@ class ExperimentsTests(unittest.TestCase):
         for name, template in EXPERIMENTS.items():
             diffs = [i for i, (x, y) in enumerate(zip(BASE_CLASS_WEIGHTS,
                                                       template["class_weights"])) if x != y]
-            self.assertEqual(len(diffs), 0 if name == "baseline_control" else 1, name)
+            self.assertEqual(len(diffs), 0 if name in ("baseline_control", "low_lr", "very_low_lr") else 1, name)
             self.assertEqual(get_experiment(name), template)
         with self.assertRaises(ValueError):
             get_experiment("change_LUT")

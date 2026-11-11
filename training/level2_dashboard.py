@@ -57,6 +57,18 @@ button:disabled{background:#566375;cursor:default}
 <p class="hint" id="autorisk"></p>
 <p class="hint">本區只顯示決策紀錄。控制器只有透過本機 PowerShell --execute 才會真的啟動新訓練；此網頁不啟動模型。</p>
 </section>
+<section><h2>Level 4：Codex 自主迭代訓練</h2>
+<div class="metrics">
+<div class="metric">狀態<strong id="level4status">—</strong></div>
+<div class="metric">完成輪數<strong id="level4rounds">—</strong></div>
+<div class="metric">目前最佳植被 mIoU<strong id="level4miou">—</strong></div>
+<div class="metric">最佳模型逐圖覆蓋率 MAE<strong id="level4mae">—</strong></div>
+</div>
+<p id="level4choice"></p>
+<p id="level4reason" style="white-space:pre-wrap"></p>
+<p class="hint" id="level4progress">尚無 Level4 訓練紀錄。</p>
+<p class="hint">啟動與停止在本機 PowerShell 控制；此網頁僅讀取狀態。</p>
+</section>
 <section><h2>Codex 自主新實驗（不覆蓋基準模型）</h2>
 <div class="metrics">
 <div class="metric">實驗狀態<strong id="pilotstatus">—</strong></div>
@@ -126,6 +138,16 @@ text("details","輸入 "+(t.last_input_tokens??"—")+" / 輸出 "+(t.last_outpu
 rate("short",u.short);rate("long",u.long);text("usageinfo",u.message||"尚未取得 Codex 日誌");
 text("epoch",m.latest_epoch);text("miou",typeof m.best_vegetation_miou==="number"?(m.best_vegetation_miou*100).toFixed(2)+"%":"—");
 text("alerts",Array.isArray(m.alerts)?m.alerts.length:"—");
+const l4=d.level4||{};
+text("level4status",l4.status||"未啟動");
+text("level4rounds",l4.round_count??0);
+text("level4miou",l4.champion_miou!=null?(l4.champion_miou*100).toFixed(2)+"%":"—");
+text("level4mae",l4.champion_coverage_mae_pp!=null?l4.champion_coverage_mae_pp.toFixed(3)+" pp":"原始模型尚無資料");
+text("level4choice","最近選擇："+(l4.last_decision?.experiment_id||"尚無"));
+text("level4reason","決策理由："+(l4.last_decision?.reason||"尚無"));
+text("level4progress",l4.last_round?
+"最近一輪："+l4.last_round.id+"｜相對當前最佳 "+l4.last_round.champion_change_pp+" pp｜已提升最佳權重："+(l4.last_round.promoted?"是":"否")
+:(l4.stop_reason||"尚無實驗結果"));
 const pilot=d.experiment_decision||{};
 text("pilotstatus",pilot.status||"未啟動");
 text("pilotid",pilot.experiment_id||"未選擇");
@@ -316,6 +338,25 @@ def experiment_decision_state():
         return {}
 
 
+def level4_state():
+    try:
+        path = ROOT / "outputs_training_v5_experiments" / "monitor" / "level4_state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        rounds = state.get("rounds", [])
+        return {
+            "status": state.get("status"),
+            "round_count": len(rounds),
+            "champion_miou": state.get("champion_miou"),
+            "champion_coverage_mae_pp": state.get("champion_coverage_mae_pp"),
+            "champion_checkpoint": state.get("champion_checkpoint"),
+            "stop_reason": state.get("stop_reason"),
+            "last_decision": state.get("last_decision"),
+            "last_round": rounds[-1] if rounds else None,
+        }
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def handler_factory(output, csrf):
     approvals = output / "approvals"
 
@@ -343,6 +384,7 @@ def handler_factory(output, csrf):
                     "codex": codex_report_state(output),
                     "auto_decision": auto_decision_state(output),
                     "experiment_decision": experiment_decision_state(),
+                    "level4": level4_state(),
                 }, ensure_ascii=False))
             else:
                 self.send_body('{"error":"not found"}', 404)
