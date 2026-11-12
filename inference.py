@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from tempfile import TemporaryFile
 from zipfile import ZipFile
 
 import numpy as np
@@ -53,7 +54,10 @@ MODEL_CONFIG = {
     "unet": {
         "display_name": "U-Net",
         "default_encoder": "resnet50",
-        "paths": [MODELS_DIR / "unet_best.pth"],
+        "paths": [
+            MODELS_DIR / "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.zip",
+            MODELS_DIR / "unet_best.pth",
+        ],
     },
     "pspnet": {
         "display_name": "PSPNet",
@@ -100,6 +104,33 @@ def _load_checkpoint(path):
         return torch.load(path, map_location=DEVICE, weights_only=True)
     except TypeError:
         return torch.load(path, map_location=DEVICE)
+
+
+def _load_stage4_unet(path):
+    member = "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.pth"
+    expected = "ff26cad1c30a5c3571d6e0de3cdb8c30205e2bdbbac361c408848b9fa8a39d3a"
+    with ZipFile(path) as archive, TemporaryFile() as checkpoint_file:
+        if archive.getinfo(member).file_size != 390818787:
+            raise ValueError("U-Net Stage 4 權重大小不符")
+        digest = hashlib.sha256()
+        with archive.open(member) as src:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                checkpoint_file.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise ValueError("U-Net Stage 4 權重 SHA-256 不符")
+        checkpoint_file.seek(0)
+        # This exact training checkpoint contains a NumPy confusion matrix.
+        # Only deserialize after verifying the complete, pinned byte stream.
+        payload = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+    return {
+        "model_state_dict": payload["model_state_dict"],
+        "encoder": "resnet50",
+        "class_names": [row["class"] for row in payload["class_metrics"]],
+        "best_miou": payload["best_val_miou"],
+        "epoch": payload["epoch"],
+        "checkpoint_sha256": expected,
+    }
 
 
 def _build_smp_model(model_name, encoder, num_classes):
@@ -277,7 +308,8 @@ def load_model(model_name):
         _MODEL_MTIMES[model_name] = mtime
         return model
 
-    checkpoint = _load_checkpoint(model_path)
+    stage4_unet = model_name == "unet" and model_path.suffix.lower() == ".zip"
+    checkpoint = _load_stage4_unet(model_path) if stage4_unet else _load_checkpoint(model_path)
     config = MODEL_CONFIG[model_name]
 
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -330,6 +362,12 @@ def load_model(model_name):
         "checkpoint_path": str(model_path),
         "id2label": {i: name for i, name in enumerate(class_names)},
     }
+    if stage4_unet:
+        _MODEL_META[model_name].update(
+            epoch=checkpoint["epoch"],
+            checkpoint_sha256=checkpoint["checkpoint_sha256"],
+            preprocessing="RGB / ImageNet / 512 px windows / 256 px stride",
+        )
     return model
 
 
