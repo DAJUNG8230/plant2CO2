@@ -1,4 +1,8 @@
+import hashlib
+import io
+import json
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 from PIL import Image
@@ -60,6 +64,7 @@ MODEL_CONFIG = {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
         "paths": [
+            MODELS_DIR / "SegFormer_B0_Full_FLAIR_Web_Integration.zip",
             MODELS_DIR / "best_model_segformer",
             MODELS_DIR / "segformer_best",
             MODELS_DIR / "segformer_best.pth",
@@ -133,6 +138,30 @@ def _load_segformer(model_path):
             "SegFormer 需要 transformers，請執行 "
             "python -m pip install -r requirements.txt"
         ) from exc
+
+    if model_path.suffix.lower() == ".zip":
+        from transformers import SegformerConfig
+
+        prefix = "SegFormer_B0_Full_FLAIR_Web_Integration/"
+        with ZipFile(model_path) as archive:
+            config = json.loads(archive.read(prefix + "config.json"))
+            raw = archive.read(prefix + "model/best.pt")
+        checksum = hashlib.sha256(raw).hexdigest()
+        if checksum != "e273251ac35426bd2bd5b5bc3da0b46c0237752cdfba2db04b5a7736598c4e25":
+            raise ValueError("SegFormer Full FLAIR 權重校驗失敗")
+        checkpoint = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
+        model = SegformerForSemanticSegmentation(SegformerConfig.from_dict(config["huggingface_config"]))
+        model.load_state_dict(checkpoint["model"], strict=True)
+        model.to(DEVICE).eval()
+        _MODEL_META["segformer"] = {
+            "encoder": "MiT-B0", "num_classes": NUM_CLASSES, "image_size": 512,
+            "epoch": checkpoint["epoch"], "best_miou": float(checkpoint["best_mIoU"]),
+            "checkpoint_path": str(model_path), "checkpoint_sha256": checksum,
+            "preprocessing": "Full FLAIR RGB / 512 px windows / 256 px stride",
+            "id2label": {int(i): name for i, name in model.config.id2label.items()},
+        }
+        _PROCESSORS["segformer"] = None
+        return model
 
     if not model_path.is_dir():
         raise ValueError(
@@ -329,6 +358,8 @@ def _prepare_tensor(rgb, image_size, normalize=True):
 def _predict_segformer(rgb):
     model = load_model("segformer")
     processor = _PROCESSORS["segformer"]
+    if processor is None:
+        return _predict_full_flair(rgb, model)
     inputs = processor(
         images=Image.fromarray(rgb),
         return_tensors="pt",
@@ -359,6 +390,38 @@ def _tile_positions(length, tile_size, stride):
         positions.append(last)
 
     return positions
+
+
+@torch.inference_mode()
+def _predict_full_flair(rgb, model):
+    height, width = rgb.shape[:2]
+    if height * width > 20_000_000:
+        raise ValueError("SegFormer Full FLAIR 支援最多 2,000 萬像素")
+    size, stride = 512, 256
+    sums = torch.zeros((NUM_CLASSES, height, width), dtype=torch.float32)
+    hits = torch.zeros((height, width), dtype=torch.int32)
+    mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+    std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+    boxes = [(y, x) for y in _tile_positions(height, size, stride)
+            for x in _tile_positions(width, size, stride)]
+    for start in range(0, len(boxes), 4):
+        batch = boxes[start:start + 4]
+        tiles = []
+        for y, x in batch:
+            crop = rgb[y:y + size, x:x + size]
+            tile = np.zeros((size, size, 3), dtype=np.uint8)
+            tile[:crop.shape[0], :crop.shape[1]] = crop
+            tensor = torch.from_numpy(tile).permute(2, 0, 1).float().div_(255)
+            tiles.append((tensor - mean) / std)
+        with torch.autocast(device_type=DEVICE.type, enabled=False):
+            logits = model(pixel_values=torch.stack(tiles).to(DEVICE)).logits.float().cpu()
+        for i, (y, x) in enumerate(batch):
+            h, w = min(size, height - y), min(size, width - x)
+            tile = F.interpolate(logits[i:i+1], size=(size, size),
+                                 mode="bilinear", align_corners=False)[0]
+            sums[:, y:y+h, x:x+w] += tile[:, :h, :w]
+            hits[y:y+h, x:x+w] += 1
+    return sums.div_(hits).argmax(0).numpy().astype(np.uint8)
 
 
 def _make_tile_weight(tile_size):
