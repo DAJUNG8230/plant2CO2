@@ -82,7 +82,7 @@ if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-OUTPUT_DIR = Path("outputs_training_resume_72")
+OUTPUT_DIR = Path("outputs_training_shrub_v4")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -702,8 +702,8 @@ def build_datasets():
     label_studio_train_dataset = None
 
     if USE_FLAIR:
-        flair_train = Path("flair_manifests/train.csv")
-        flair_val = Path("flair_manifests/val.csv")
+        flair_train = Path("flair_manifests_v4_shrub/train.csv")
+        flair_val = Path("flair_manifests_v4_shrub/val.csv")
 
         if not flair_train.exists() or not flair_val.exists():
             raise FileNotFoundError(
@@ -811,6 +811,12 @@ def build_datasets():
 
 
 def main():
+    if not Path("flair_manifests_v4_shrub/shrub_counts.json").is_file():
+        raise RuntimeError("Prepare and verify the v4 shrub manifests before training.")
+    if (OUTPUT_DIR / "history.csv").exists():
+        raise FileExistsError(f"Existing run found: {OUTPUT_DIR}. Rename it before a new run.")
+    if DEVICE.type == "cuda" and get_gpu_temperature_c() is None:
+        raise RuntimeError("GPU temperature unavailable. Check nvidia-ml-py before training.")
     print("Device:", DEVICE)
     print("Classes:")
     for i, name in enumerate(CLASS_NAMES):
@@ -857,7 +863,7 @@ def main():
 
     model = smp.DeepLabV3Plus(
         encoder_name="resnet50",
-        encoder_weights="imagenet",
+        encoder_weights=None,
         in_channels=3,
         classes=NUM_CLASSES,
     ).to(DEVICE)
@@ -947,7 +953,7 @@ def main():
         patience=3,
     )
 
-    best_vegetation_miou = resumed_miou
+    best_vegetation_miou = float("-inf")
     epochs_without_improvement = 0
     history_path = OUTPUT_DIR / "history.csv"
 
@@ -1229,6 +1235,11 @@ def main():
 
         if should_validate:
             save_confusion_matrix(cm, epoch)
+            shrub_gt = int(cm[3].sum().item())
+            shrub_pred = int(cm[:, 3].sum().item())
+            shrub_tp = int(cm[3, 3].item())
+            print(f"Shrub GT={shrub_gt:,}, predicted={shrub_pred:,}, correct={shrub_tp:,}")
+            print("Shrub GT by prediction:", cm[3].tolist())
 
         plot_history["epoch"].append(epoch)
         plot_history["train_loss"].append(train_loss)
@@ -1296,9 +1307,9 @@ def main():
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "gradient_clip_max_norm": 5.0,
                         "baseline_source": str(BASELINE_MODEL_PATH),
-                        "baseline_miou_floor": BASELINE_VEGETATION_MIOU,
+                        "source_reported_miou": resumed_miou,
                         "lr_scheduler_patience": 3,
-                        "flair_mapping_revision": "v3_brushwood_ignore",
+                        "flair_mapping_revision": "v4_brushwood_shrub",
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
