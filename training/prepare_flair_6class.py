@@ -110,7 +110,8 @@ def convert_mask(label_path: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(converted).save(output_path)
 
-    counts = np.bincount(converted[converted != 255], minlength=len(CLASS_NAMES))\n    return counts
+    counts = np.bincount(converted[converted != 255], minlength=len(CLASS_NAMES))
+    return counts
 
 
 def main():
@@ -157,7 +158,11 @@ def main():
 
     matched = 0
     missing = 0
-    split_counts = {"train": 0, "val": 0, "test": 0}\n    pixel_counts = {split: np.zeros(len(CLASS_NAMES), dtype=np.int64) for split in split_counts}
+    split_counts = {"train": 0, "val": 0, "test": 0}
+    pixel_counts = {
+        split: np.zeros(len(CLASS_NAMES), dtype=np.int64)
+        for split in split_counts
+    }
 
     try:
         for label_path in tqdm(labels, desc="Converting FLAIR masks"):
@@ -182,7 +187,8 @@ def main():
                 / f"{label_path.stem}.png"
             )
 
-            mask_class_counts = convert_mask(label_path, out_path)\n            pixel_counts[split] += mask_class_counts
+            mask_class_counts = convert_mask(label_path, out_path)
+            pixel_counts[split] += mask_class_counts
 
             writers[split].writerow([
                 str(image_path),
@@ -204,7 +210,18 @@ def main():
     print(f"Manifests: {MANIFEST_DIR.resolve()}")
 
     for split, count in split_counts.items():
-        print(f"{split}: {count:,}")
+        counts = pixel_counts[split]
+        total = int(counts.sum())
+        shrub_count = int(counts[3])
+        shrub_pct = 100.0 * shrub_count / total if total else 0.0
+        print(f"{split}: {count:,} images")
+        print(f"  class pixels: {counts.tolist()}")
+        print(f"  Shrub pixels: {shrub_count:,} ({shrub_pct:.4f}% of mapped pixels)")
+        if split in {"train", "val"} and shrub_count == 0:
+            raise RuntimeError(
+                f"{split} split has no Shrub pixels after mapping. "
+                "Do not start training until the class mapping/data is corrected."
+            )
 
 
 if __name__ == "__main__":
