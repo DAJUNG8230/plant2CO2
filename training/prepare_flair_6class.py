@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import csv
 import random
 
@@ -8,8 +9,8 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v3")
-MANIFEST_DIR = Path("flair_manifests")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v4_shrub")
+MANIFEST_DIR = Path("flair_manifests_v4_shrub")
 
 SEED = 42
 
@@ -59,7 +60,7 @@ FLAIR_TO_6 = {
     5: 1,   # water -> Other Non-Veg
     6: 4,   # coniferous -> Trees
     7: 4,   # deciduous -> Trees
-    8: 255, # brushwood -> Ignore (too coarse for precise shrub boundaries)
+    8: 3,   # brushwood -> Shrub
     9: 5,   # vineyard -> Cultivated
     10: 2,  # herbaceous vegetation -> Herbaceous
     11: 5,  # agricultural land -> Cultivated
@@ -116,7 +117,10 @@ def convert_mask(label_path: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(converted).save(output_path)
 
-    return np.unique(raw), np.unique(converted)
+    raw_count = int(np.count_nonzero(raw == 8))
+    if raw_count != np.count_nonzero(converted == 3):
+        raise RuntimeError(f"Shrub mapping mismatch: {label_path}")
+    return raw_count
 
 
 def main():
@@ -130,8 +134,8 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
-    print("Mapping revision: v3")
-    print("  8 brushwood -> Ignore")
+    print("Mapping revision: v4_shrub")
+    print("  8 brushwood -> Shrub")
     print(" 16 mixed -> Trees")
     print(" 17 ligneous -> Trees")
     print(" 15 clear cut -> Ignore")
@@ -148,6 +152,9 @@ def main():
         print(f"  {split}: {sorted(values)}")
 
     MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    audit_path = MANIFEST_DIR / "shrub_counts.json"
+    audit_path.unlink(missing_ok=True)
+    counts = {split: {"pixels": 0, "tiles": 0} for split in splits}
     writers = {}
     files = {}
 
@@ -190,7 +197,9 @@ def main():
                 / f"{label_path.stem}.png"
             )
 
-            convert_mask(label_path, out_path)
+            shrub_pixels = convert_mask(label_path, out_path)
+            counts[split]["pixels"] += shrub_pixels
+            counts[split]["tiles"] += int(shrub_pixels > 0)
 
             writers[split].writerow([
                 str(image_path),
@@ -205,6 +214,10 @@ def main():
         for f in files.values():
             f.close()
 
+    if missing or any(counts[s]["pixels"] == 0 for s in ("train", "val")):
+        raise RuntimeError(f"Incomplete FLAIR data: missing={missing}, shrub={counts}")
+    audit_path.write_text(json.dumps(counts, indent=2), encoding="utf-8")
+    print("Shrub counts:", counts)
     print("\nFinished")
     print(f"Matched: {matched:,}")
     print(f"Missing image: {missing:,}")
