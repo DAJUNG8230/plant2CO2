@@ -55,6 +55,7 @@ MODEL_CONFIG = {
         "display_name": "U-Net",
         "default_encoder": "resnet50",
         "paths": [
+            MODELS_DIR / "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.pth",
             MODELS_DIR / "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.zip",
             MODELS_DIR / "unet_best.pth",
         ],
@@ -68,6 +69,7 @@ MODEL_CONFIG = {
         "display_name": "SegFormer",
         "default_encoder": "MiT",
         "paths": [
+            MODELS_DIR / "SegFormer_B0_Full_FLAIR_Web_Integration",
             MODELS_DIR / "SegFormer_B0_Full_FLAIR_Web_Integration.zip",
             MODELS_DIR / "best_model_segformer",
             MODELS_DIR / "segformer_best",
@@ -109,11 +111,14 @@ def _load_checkpoint(path):
 def _load_stage4_unet(path):
     member = "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.pth"
     expected = "ff26cad1c30a5c3571d6e0de3cdb8c30205e2bdbbac361c408848b9fa8a39d3a"
-    with ZipFile(path) as archive, TemporaryFile() as checkpoint_file:
-        if archive.getinfo(member).file_size != 390818787:
+    from contextlib import nullcontext
+    source = ZipFile(path) if path.suffix.lower() == ".zip" else nullcontext(None)
+    with source as archive, TemporaryFile() as checkpoint_file:
+        size = archive.getinfo(member).file_size if archive else path.stat().st_size
+        if size != 390818787:
             raise ValueError("U-Net Stage 4 權重大小不符")
         digest = hashlib.sha256()
-        with archive.open(member) as src:
+        with (archive.open(member) if archive else path.open("rb")) as src:
             for chunk in iter(lambda: src.read(1024 * 1024), b""):
                 checkpoint_file.write(chunk)
                 digest.update(chunk)
@@ -170,13 +175,17 @@ def _load_segformer(model_path):
             "python -m pip install -r requirements.txt"
         ) from exc
 
-    if model_path.suffix.lower() == ".zip":
+    if model_path.suffix.lower() == ".zip" or (model_path / "model/best.pt").is_file():
         from transformers import SegformerConfig
 
         prefix = "SegFormer_B0_Full_FLAIR_Web_Integration/"
-        with ZipFile(model_path) as archive:
-            config = json.loads(archive.read(prefix + "config.json"))
-            raw = archive.read(prefix + "model/best.pt")
+        if model_path.is_dir():
+            config = json.loads((model_path / "config.json").read_text(encoding="utf-8-sig"))
+            raw = (model_path / "model/best.pt").read_bytes()
+        else:
+            with ZipFile(model_path) as archive:
+                config = json.loads(archive.read(prefix + "config.json"))
+                raw = archive.read(prefix + "model/best.pt")
         checksum = hashlib.sha256(raw).hexdigest()
         if checksum != "e273251ac35426bd2bd5b5bc3da0b46c0237752cdfba2db04b5a7736598c4e25":
             raise ValueError("SegFormer Full FLAIR 權重校驗失敗")
@@ -308,7 +317,7 @@ def load_model(model_name):
         _MODEL_MTIMES[model_name] = mtime
         return model
 
-    stage4_unet = model_name == "unet" and model_path.suffix.lower() == ".zip"
+    stage4_unet = model_name == "unet" and (model_path.suffix.lower() == ".zip" or model_path.name == "BEST_THIS_RUN_unet_resnet50_stage4_finetune50.pth")
     checkpoint = _load_stage4_unet(model_path) if stage4_unet else _load_checkpoint(model_path)
     config = MODEL_CONFIG[model_name]
 
