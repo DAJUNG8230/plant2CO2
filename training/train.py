@@ -47,9 +47,9 @@ CLASS_NAMES = [
 VEGETATION_CLASS_IDS = [2, 3, 4, 5]
 
 IMAGE_SIZE = 768
-EPOCHS = 30
-LEARNING_RATE = 1e-5
-EARLY_STOPPING_PATIENCE = 12
+EPOCHS = 40
+LEARNING_RATE = 5e-6
+EARLY_STOPPING_PATIENCE = 10
 
 NUM_WORKERS = 4
 PREFETCH_FACTOR = 2
@@ -82,7 +82,7 @@ if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-OUTPUT_DIR = Path("outputs_training_resume_72")
+OUTPUT_DIR = Path("outputs_training_shrub_fix_v5")
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -310,7 +310,7 @@ def masked_dice_loss(logits, targets):
     )
 
     class_weights = torch.tensor(
-        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+        [1.20, 0.80, 1.25, 1.80, 1.00, 0.90],
         device=logits.device,
         dtype=dice.dtype,
     )
@@ -378,14 +378,14 @@ def safe_segmentation_loss(
 
     if lovasz.numel() == 0:
         return (
-            0.70 * ce
-            + 0.30 * dice
+            0.65 * ce
+            + 0.35 * dice
         )
 
     return (
         0.35 * ce
-        + 0.45 * lovasz
-        + 0.20 * dice
+        + 0.40 * lovasz
+        + 0.25 * dice
     )
 
 
@@ -702,8 +702,8 @@ def build_datasets():
     label_studio_train_dataset = None
 
     if USE_FLAIR:
-        flair_train = Path("flair_manifests/train.csv")
-        flair_val = Path("flair_manifests/val.csv")
+        flair_train = Path("flair_manifests_v5_shrub/train.csv")
+        flair_val = Path("flair_manifests_v5_shrub/val.csv")
 
         if not flair_train.exists() or not flair_val.exists():
             raise FileNotFoundError(
@@ -905,7 +905,7 @@ def main():
         )
 
     class_weights = torch.tensor(
-        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+        [1.20, 0.80, 1.25, 1.80, 1.00, 0.90],
         dtype=torch.float32,
         device=DEVICE,
     )
@@ -948,6 +948,7 @@ def main():
     )
 
     best_vegetation_miou = resumed_miou
+    best_selection_score = -1.0
     epochs_without_improvement = 0
     history_path = OUTPUT_DIR / "history.csv"
 
@@ -1274,8 +1275,23 @@ def main():
             torch.cuda.empty_cache()
 
         if should_validate:
-            if miou_vegetation > best_vegetation_miou + 1e-4:
-                best_vegetation_miou = miou_vegetation
+            shrub_iou = float(ious[3].item())
+            selection_score = (
+                0.70 * miou_vegetation
+                + 0.30 * shrub_iou
+                if np.isfinite(shrub_iou)
+                else float("nan")
+            )
+
+            if (
+                np.isfinite(selection_score)
+                and selection_score > best_selection_score + 1e-4
+            ):
+                best_selection_score = selection_score
+                best_vegetation_miou = max(
+                    best_vegetation_miou,
+                    miou_vegetation,
+                )
                 epochs_without_improvement = 0
 
                 torch.save(
@@ -1286,45 +1302,55 @@ def main():
                         "class_names": CLASS_NAMES,
                         "vegetation_class_ids": VEGETATION_CLASS_IDS,
                         "image_size": IMAGE_SIZE,
-                        "crop_mode": "resize_768_baseline_continuation",
+                        "crop_mode": "resize_768_shrub_mapping_finetune",
                         "batch_size": BATCH_SIZE,
                         "num_workers": NUM_WORKERS,
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
-                        "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
-                        "class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+                        "loss": "0.35 CE + 0.40 Lovasz + 0.25 Dice",
+                        "class_weights": [1.20, 0.80, 1.25, 1.80, 1.00, 0.90],
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "gradient_clip_max_norm": 5.0,
                         "baseline_source": str(BASELINE_MODEL_PATH),
                         "baseline_miou_floor": BASELINE_VEGETATION_MIOU,
                         "lr_scheduler_patience": 3,
-                        "flair_mapping_revision": "v3_brushwood_ignore",
+                        "flair_mapping_revision": "v5_shared_validation_lut_brushwood_to_shrub",
                         "best_miou": best_vegetation_miou,
+                        "shrub_iou": shrub_iou,
+                        "selection_score": best_selection_score,
+                        "selection_metric": "0.70*vegetation_mIoU + 0.30*Shrub_IoU",
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
                     },
                     OUTPUT_DIR / "best_model.pth",
                 )
 
-                print("Saved best model.")
+                print(
+                    "Saved best shrub-aware model; "
+                    f"selection score={best_selection_score * 100:.2f}%."
+                )
 
-                if best_vegetation_miou >= TARGET_VEGETATION_MIOU:
+                if (
+                    best_vegetation_miou >= TARGET_VEGETATION_MIOU
+                    and shrub_iou >= 0.30
+                ):
                     print(
-                        "\nTarget reached: vegetation mIoU "
-                        f">= {TARGET_VEGETATION_MIOU * 100:.0f}%"
+                        "\nTargets reached: vegetation mIoU "
+                        f">= {TARGET_VEGETATION_MIOU * 100:.0f}% "
+                        "and Shrub IoU >= 30%."
                     )
                     break
             else:
                 epochs_without_improvement += 1
                 print(
-                    "No vegetation mIoU improvement: "
+                    "No shrub-aware selection-score improvement: "
                     f"{epochs_without_improvement}/"
                     f"{EARLY_STOPPING_PATIENCE}"
                 )
 
             if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
                 print(
-                    "\nEarly stopping: vegetation mIoU "
+                    "\nEarly stopping: shrub-aware selection score "
                     "has not improved."
                 )
                 break
