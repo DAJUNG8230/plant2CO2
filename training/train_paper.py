@@ -86,7 +86,7 @@ if DEVICE.type == "cuda":
     torch.backends.cudnn.allow_tf32 = True
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--run", required=True, choices=["control", "shrub_weight"])
+parser.add_argument("--run", required=True, choices=["control", "ignore_flair_shrub"])
 parser.add_argument("--checkpoint", type=Path, required=True)
 parser.add_argument("--epochs", type=int, default=10)
 parser.add_argument("--lr", type=float, default=1e-5)
@@ -97,7 +97,7 @@ if args.epochs < 1 or args.lr <= 0:
 EPOCHS = args.epochs
 LEARNING_RATE = args.lr
 BASELINE_MODEL_PATH = args.checkpoint
-SHRUB_WEIGHT = 1.45 if args.run == "control" else 1.80
+SHRUB_WEIGHT = 1.45
 OUTPUT_DIR = Path("outputs_training_paper") / args.run
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -156,7 +156,8 @@ class SegmentationDataset(Dataset):
 
 
 class ManifestDataset(Dataset):
-    def __init__(self, manifest_path, augment=False):
+    def __init__(self, manifest_path, augment=False, ignore_shrub=False):
+        self.ignore_shrub = ignore_shrub
         self.augment = augment
         self.rows = []
 
@@ -173,7 +174,10 @@ class ManifestDataset(Dataset):
 
     def __getitem__(self, index):
         image_path, mask_path = self.rows[index]
-        return load_pair(image_path, mask_path, self.augment)
+        image, mask = load_pair(image_path, mask_path, self.augment)
+        if self.ignore_shrub:
+            mask[mask == 3] = IGNORE_INDEX
+        return image, mask
 
 
 def _pad_to_crop_size(image, mask):
@@ -730,6 +734,7 @@ def build_datasets():
         flair_train_dataset = ManifestDataset(
             flair_train,
             augment=True,
+            ignore_shrub=args.run == "ignore_flair_shrub",
         )
         train_sets.append(flair_train_dataset)
         val_sets.append(
@@ -844,6 +849,8 @@ def main():
             digest.update(chunk)
         checkpoint_hash = digest.hexdigest()
     (OUTPUT_DIR / "run_config.json").write_text(json.dumps({
+        "ignore_flair_train_shrub": args.run == "ignore_flair_shrub",
+        "ce_class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
         "run": args.run, "seed": args.seed, "epochs": EPOCHS,
         "lr": LEARNING_RATE, "shrub_ce_weight": SHRUB_WEIGHT,
         "checkpoint": str(BASELINE_MODEL_PATH), "sha256": checkpoint_hash,
