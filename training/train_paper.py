@@ -839,7 +839,10 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     with BASELINE_MODEL_PATH.open("rb") as stream:
-        checkpoint_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        checkpoint_hash = digest.hexdigest()
     (OUTPUT_DIR / "run_config.json").write_text(json.dumps({
         "run": args.run, "seed": args.seed, "epochs": EPOCHS,
         "lr": LEARNING_RATE, "shrub_ce_weight": SHRUB_WEIGHT,
