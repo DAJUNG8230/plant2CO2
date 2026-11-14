@@ -91,14 +91,20 @@ parser.add_argument("--checkpoint", type=Path, required=True)
 parser.add_argument("--epochs", type=int, default=10)
 parser.add_argument("--lr", type=float, default=1e-5)
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--out", type=Path)
+parser.add_argument("--eval-only", action="store_true")
+parser.add_argument("--class-weights", type=float, nargs=6,
+                    default=[1.20, 0.80, 1.25, 1.45, 1.00, 0.90])
 args = parser.parse_args()
-if args.epochs < 1 or args.lr <= 0:
+if args.epochs < 1 or not np.isfinite(args.lr) or args.lr <= 0:
     parser.error("epochs and lr must be positive")
 EPOCHS = args.epochs
 LEARNING_RATE = args.lr
 BASELINE_MODEL_PATH = args.checkpoint
-SHRUB_WEIGHT = 1.45
-OUTPUT_DIR = Path("outputs_training_paper") / args.run
+if not all(np.isfinite(w) and w > 0 for w in args.class_weights):
+    parser.error("All six class weights must be finite and positive")
+SHRUB_WEIGHT = args.class_weights[3]
+OUTPUT_DIR = args.out or (Path("outputs_training_paper") / args.run)
 PLOT_DIR = OUTPUT_DIR / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,8 +172,9 @@ class ManifestDataset(Dataset):
             for row in reader:
                 image_path = Path(row["image"])
                 mask_path = Path(row["mask"])
-                if image_path.exists() and mask_path.exists():
-                    self.rows.append((image_path, mask_path))
+                if not image_path.is_file() or not mask_path.is_file():
+                    raise FileNotFoundError(f"Missing manifest pair: {image_path}, {mask_path}")
+                self.rows.append((image_path, mask_path))
 
     def __len__(self):
         return len(self.rows)
@@ -698,6 +705,8 @@ def check_gpu_temperature_or_stop():
     temp = get_gpu_temperature_c()
 
     if temp is None:
+        if DEVICE.type == "cuda":
+            raise RuntimeError("GPU temperature monitoring became unavailable")
         return False, None
 
     if temp >= GPU_TEMP_LIMIT_C:
@@ -850,7 +859,7 @@ def main():
         checkpoint_hash = digest.hexdigest()
     (OUTPUT_DIR / "run_config.json").write_text(json.dumps({
         "ignore_flair_train_shrub": args.run == "ignore_flair_shrub",
-        "ce_class_weights": [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+        "ce_class_weights": args.class_weights,
         "run": args.run, "seed": args.seed, "epochs": EPOCHS,
         "lr": LEARNING_RATE, "shrub_ce_weight": SHRUB_WEIGHT,
         "checkpoint": str(BASELINE_MODEL_PATH), "sha256": checkpoint_hash,
@@ -864,6 +873,20 @@ def main():
         print(f"  {i}: {name}")
 
     train_dataset, val_dataset, train_sampler = build_datasets()
+
+    if not args.eval_only and args.run == "control":
+        audit = []
+        for mask_path in iter_mask_paths(train_dataset):
+            with Image.open(mask_path) as mask_image:
+                pixels = int((np.asarray(mask_image) == 3).sum())
+            if pixels:
+                audit.append({"mask": str(mask_path), "shrub_pixels": pixels})
+            if len(audit) == 16:
+                break
+        (OUTPUT_DIR / "train_shrub_audit.json").write_text(
+            json.dumps(audit, indent=2), encoding="utf-8")
+        if not audit:
+            raise RuntimeError("No class-3 shrub pixels in training masks. Rebuild paper masks first.")
 
     print("Dataset source: FLAIR + Label Studio")
     print(f"Train samples: {len(train_dataset):,}")
@@ -952,7 +975,7 @@ def main():
         )
 
     class_weights = torch.tensor(
-        [1.20, 0.80, 1.25, 1.45, 1.00, 0.90],
+        args.class_weights,
         dtype=torch.float32,
         device=DEVICE,
     )
@@ -1043,7 +1066,7 @@ def main():
 
     stop_for_temperature = False
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(0, 1 if args.eval_only else EPOCHS + 1):
         model.train()
         train_loss = 0.0
         valid_train_batches = 0
@@ -1052,7 +1075,7 @@ def main():
         grad_norm_steps = 0
 
         train_progress = tqdm(
-            train_loader,
+            train_loader if epoch > 0 else [],
             desc=f"Epoch {epoch:02d}/{EPOCHS} Train",
             dynamic_ncols=True,
             leave=True,
@@ -1172,13 +1195,17 @@ def main():
             valid_val_batches = 0
 
             with torch.no_grad():
-                for images, masks in tqdm(
+                for val_batch_index, (images, masks) in enumerate(tqdm(
                     val_loader,
                     desc=f"Epoch {epoch:02d}/{EPOCHS} Val",
                     dynamic_ncols=True,
                     leave=True,
                     mininterval=0.5,
-                ):
+                ), start=1):
+                    if val_batch_index == 1 or val_batch_index % GPU_TEMP_CHECK_EVERY_BATCHES == 0:
+                        too_hot, _ = check_gpu_temperature_or_stop()
+                        if too_hot:
+                            raise RuntimeError("GPU temperature limit reached during validation")
                     images = images.to(DEVICE, non_blocking=True)
                     masks = masks.to(DEVICE, non_blocking=True)
 
@@ -1217,7 +1244,10 @@ def main():
                     ).reshape(NUM_CLASSES, NUM_CLASSES)
 
             val_loss /= max(valid_val_batches, 1)
-            scheduler.step(val_loss)
+            if valid_val_batches == 0:
+                raise RuntimeError("Validation contains no usable labeled batches")
+            if epoch > 0:
+                scheduler.step(val_loss)
 
             ious = calculate_iou(cm)
             miou_all = safe_mean(ious)
@@ -1338,19 +1368,20 @@ def main():
                         "class_names": CLASS_NAMES,
                         "vegetation_class_ids": VEGETATION_CLASS_IDS,
                         "image_size": IMAGE_SIZE,
-                        "crop_mode": "resize_768_baseline_continuation",
+                        "crop_mode": "resize_512",
                         "batch_size": BATCH_SIZE,
                         "num_workers": NUM_WORKERS,
                         "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
                         "amp": amp_enabled,
                         "loss": "0.35 CE + 0.45 Lovasz + 0.20 Dice",
-                        "class_weights": [1.20, 0.80, 1.25, SHRUB_WEIGHT, 1.00, 0.90],
+                        "class_weights": args.class_weights,
                         "label_studio_train_share": LABEL_STUDIO_TRAIN_SHARE,
                         "gradient_clip_max_norm": 5.0,
                         "baseline_source": str(BASELINE_MODEL_PATH),
                         "source_reported_miou": resumed_miou,
                         "lr_scheduler_patience": 3,
                         "flair_mapping_revision": "paper_common_validation_lut",
+                        "epoch": epoch,
                         "best_miou": best_vegetation_miou,
                         "binary_vegetation_iou": binary_metrics["iou"],
                         "binary_vegetation_f1": binary_metrics["f1"],
@@ -1375,7 +1406,9 @@ def main():
         except Exception:
             pass
 
-    print("\nTraining finished.")
+    if stop_for_temperature:
+        raise RuntimeError("Training stopped at GPU temperature limit")
+    print("\nEvaluation finished." if args.eval_only else "\nTraining finished.")
     print(
         "Best vegetation mIoU:",
         f"{best_vegetation_miou * 100:.2f}%",
