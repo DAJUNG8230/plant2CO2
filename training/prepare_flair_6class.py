@@ -8,8 +8,8 @@ from tqdm import tqdm
 
 IMAGE_ROOT = Path(r"D:\FLAIR\flair_aerial_train\flair_aerial_train")
 LABEL_ROOT = Path(r"D:\FLAIR\flair_labels_train\flair_labels_train")
-OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v3")
-MANIFEST_DIR = Path("flair_manifests")
+OUTPUT_MASK_ROOT = Path(r"D:\FLAIR\flair_6class_masks_v5_shrub")
+MANIFEST_DIR = Path("flair_manifests_v5_shrub")
 
 SEED = 42
 
@@ -52,25 +52,19 @@ CLASS_NAMES = [
 # 5 Cultivated
 # 255 Ignore
 FLAIR_TO_6 = {
+    # Match the common-validation six-class LUT exactly.
     1: 1,   # building -> Other Non-Veg
-    2: 1,   # pervious surface -> Other Non-Veg
     3: 1,   # impervious surface -> Other Non-Veg
     4: 0,   # bare soil -> Bare Soil
     5: 1,   # water -> Other Non-Veg
     6: 4,   # coniferous -> Trees
     7: 4,   # deciduous -> Trees
-    8: 255, # brushwood -> Ignore (too coarse for precise shrub boundaries)
+    8: 3,   # brushwood -> Shrub
     9: 5,   # vineyard -> Cultivated
     10: 2,  # herbaceous vegetation -> Herbaceous
     11: 5,  # agricultural land -> Cultivated
-    12: 5,  # plowed land -> Cultivated
     13: 1,  # swimming pool -> Other Non-Veg
-    14: 1,  # snow -> Other Non-Veg
-    15: 255, # clear cut -> Ignore (ambiguous)
-    16: 4,  # mixed -> Trees
-    17: 4,  # ligneous -> Trees (visual audit: mostly tree crowns / urban trees)
     18: 1,  # greenhouse -> Other Non-Veg
-    19: 255, # other -> Ignore
 }
 
 
@@ -116,7 +110,8 @@ def convert_mask(label_path: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(converted).save(output_path)
 
-    return np.unique(raw), np.unique(converted)
+    counts = np.bincount(converted[converted != 255], minlength=len(CLASS_NAMES))
+    return counts
 
 
 def main():
@@ -130,12 +125,10 @@ def main():
 
     print(f"Images found: {len(images):,}")
     print(f"Labels found: {len(labels):,}")
-    print("Mapping revision: v3")
-    print("  8 brushwood -> Ignore")
-    print(" 16 mixed -> Trees")
-    print(" 17 ligneous -> Trees")
-    print(" 15 clear cut -> Ignore")
-    print(" 19 other -> Ignore")
+    print("Mapping revision: v5_shared_validation_lut")
+    print("  8 brushwood -> Shrub")
+    print("  17 ligneous -> Ignore")
+    print("  unmapped source IDs -> Ignore (255)")
 
     if len(images) != len(labels):
         print("[WARNING] 影像與標記數量不同，會依檔名實際配對。")
@@ -166,6 +159,10 @@ def main():
     matched = 0
     missing = 0
     split_counts = {"train": 0, "val": 0, "test": 0}
+    pixel_counts = {
+        split: np.zeros(len(CLASS_NAMES), dtype=np.int64)
+        for split in split_counts
+    }
 
     try:
         for label_path in tqdm(labels, desc="Converting FLAIR masks"):
@@ -190,7 +187,8 @@ def main():
                 / f"{label_path.stem}.png"
             )
 
-            convert_mask(label_path, out_path)
+            mask_class_counts = convert_mask(label_path, out_path)
+            pixel_counts[split] += mask_class_counts
 
             writers[split].writerow([
                 str(image_path),
@@ -212,7 +210,18 @@ def main():
     print(f"Manifests: {MANIFEST_DIR.resolve()}")
 
     for split, count in split_counts.items():
-        print(f"{split}: {count:,}")
+        counts = pixel_counts[split]
+        total = int(counts.sum())
+        shrub_count = int(counts[3])
+        shrub_pct = 100.0 * shrub_count / total if total else 0.0
+        print(f"{split}: {count:,} images")
+        print(f"  class pixels: {counts.tolist()}")
+        print(f"  Shrub pixels: {shrub_count:,} ({shrub_pct:.4f}% of mapped pixels)")
+        if split in {"train", "val"} and shrub_count == 0:
+            raise RuntimeError(
+                f"{split} split has no Shrub pixels after mapping. "
+                "Do not start training until the class mapping/data is corrected."
+            )
 
 
 if __name__ == "__main__":
